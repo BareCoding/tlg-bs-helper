@@ -1,2 +1,2 @@
-from .api import BrawlStarsAPI, normalise_tag, BSAPIError
-__all__ = ['BrawlStarsAPI', 'normalise_tag', 'BSAPIError']
+from .api import BrawlStarsAPI, normalize_tag, BSAPIError
+__all__ = ['BrawlStarsAPI', 'normalize_tag', 'BSAPIError']
