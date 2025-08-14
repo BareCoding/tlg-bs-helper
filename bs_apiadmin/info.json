@@ -1,0 +1,12 @@
+{
+  "author": ["BigPattyOG (BareCoding)"],
+  "install_msg": "WARNING! This cog is solely for managing the BS API for this bot. Nothing else!. Run `!bsapi token <TOKEN>` to set the token!",
+  "name": "BS-APIAdmin",
+  "short": "Admin/test commands for the Brawl Stars API.",
+  "description": "Stores the API token per guild and provides simple player/club test calls.",
+  "requirements": [],
+  "tags": ["admin","brawlstars"],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "end_user_data_statement": "Stores the guild's Brawl Stars API token."
+}
