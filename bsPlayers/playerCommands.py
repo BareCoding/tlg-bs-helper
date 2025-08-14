@@ -1,6 +1,5 @@
 # bsPlayers/playerCommands.py
 from __future__ import annotations
-import json
 from typing import List, Optional, Tuple
 
 import discord
@@ -51,7 +50,7 @@ class PlayerCommands(commands.Cog):
     """Player commands for Brawl Stars: tag management, profile, brawlers, battlelog."""
 
     __author__ = "Pat"
-    __version__ = "1.0.0"
+    __version__ = "1.0.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -59,13 +58,9 @@ class PlayerCommands(commands.Cog):
         self.config.register_user(tags=[])
 
     async def _client(self) -> BrawlStarsAPI:
-        tok = await get_token()
-        if not tok:
-            raise commands.UserFeedbackCheckFailure(
-                f"No API token set. Admins must run `{self.bot.command_prefix}acheckapi <TOKEN>` "
-                f"or a token setter command from your admin cog."
-            )
-        return BrawlStarsAPI(tok)
+        # Token is pulled from Red's shared API tokens:
+        # [p]set api brawlstars api_key,YOURTOKEN
+        return BrawlStarsAPI(self.bot)
 
     # ---------- !tag group ----------
 

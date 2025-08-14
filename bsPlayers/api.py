@@ -1,3 +1,4 @@
+# bsPlayers/api.py
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +14,7 @@ API_BASE = "https://api.brawlstars.com/v1"
 # ---------------- Exceptions & helpers ----------------
 
 class BSAPIError(RuntimeError):
+    """Raised for non-2xx responses from the Brawl Stars API."""
     def __init__(self, status: int, text: str):
         super().__init__(f"Brawl Stars API {status}: {text}")
         self.status = status
@@ -35,8 +37,10 @@ def _qs(params: Optional[Mapping[str, Any]]) -> str:
 
 class BrawlStarsAPI:
     """
-    Async client with timeouts, retries, 429 backoff, and a tiny TTL cache.
-    Token is pulled from Red's shared API tokens store.
+    Async client with timeouts, retries, 429 backoff (honors Retry-After),
+    and a tiny TTL cache.
+    Token is pulled from Red's shared API tokens store:
+        [p]set api brawlstars api_key,YOURTOKEN
     """
 
     def __init__(self, bot, *, timeout: float = 15.0):
@@ -50,16 +54,23 @@ class BrawlStarsAPI:
     async def _ensure_token(self):
         if not self._token:
             keys = await self.bot.get_shared_api_tokens("brawlstars")
-            self._token = keys.get("api_key") if keys else None
+            self._token = (keys or {}).get("api_key")
         if not self._token:
-            raise BSAPIError(401, "No Brawl Stars API key set. Use `[p]set api brawlstars api_key,YOURTOKEN`")
+            raise BSAPIError(
+                401,
+                "No Brawl Stars API key set. Use `[p]set api brawlstars api_key,YOURTOKEN`."
+            )
 
     async def _session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             await self._ensure_token()
             self._session = aiohttp.ClientSession(
                 timeout=self._timeout,
-                headers={"Authorization": f"Bearer {self._token}"},
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Accept": "application/json",
+                    "User-Agent": "Red-DiscordBot/BSPlayers",
+                },
             )
         return self._session
 
@@ -96,7 +107,9 @@ class BrawlStarsAPI:
                 return cached
 
         s = await self._session()
-        attempts, backoff = 0, 1
+        attempts = 0
+        backoff = 1.0
+
         while True:
             async with s.get(url) as r:
                 if r.status == 200:
@@ -104,36 +117,51 @@ class BrawlStarsAPI:
                     if cache_ttl > 0:
                         self._cache_set(url, data, cache_ttl)
                     return data
-                elif r.status in {429, 500, 502, 503, 504} and attempts < 5:
-                    await asyncio.sleep(backoff)
-                    attempts += 1
-                    backoff *= 2
-                    continue
+
+                # Handle rate limiting / transient errors
+                if r.status == 429:
+                    ra = r.headers.get("Retry-After")
+                    delay = float(ra) if ra else backoff
+                elif r.status in {500, 502, 503, 504}:
+                    delay = backoff
                 else:
+                    # Permanent error – include body for context
                     raise BSAPIError(r.status, await r.text())
 
+                attempts += 1
+                if attempts >= 5:
+                    raise BSAPIError(r.status, f"Retry limit reached. Body: {await r.text()}")
 
-    # --- API endpoints ---
-    async def get_player(self, tag: str): 
-        tag = normalize_tag(tag)
-        return await self._get(f"/players/%23{tag}", cache_ttl=10)
+                await asyncio.sleep(delay)
+                backoff = min(backoff * 2, 8.0)
+
+    # ---- API endpoints ----
+    async def get_player(self, tag: str):
+        """
+        Full player object incl. trophies, wins, club, and **brawlers list**.
+        """
+        return await self._get(f"/players/%23{normalize_tag(tag)}", cache_ttl=30)
 
     async def get_player_battlelog(self, tag: str):
-        tag = normalize_tag(tag)
-        return await self._get(f"/players/%23{tag}/battlelog", cache_ttl=5)
+        """
+        Recent battles for a player.
+        """
+        return await self._get(f"/players/%23{normalize_tag(tag)}/battlelog", cache_ttl=10)
 
-    async def list_brawlers(self): 
+    async def list_brawlers(self):
+        """
+        Global catalog of brawlers (names/ids). Not player-specific.
+        A player's brawlers come from `get_player(tag)["brawlers"]`.
+        """
         return await self._get("/brawlers", cache_ttl=3600)
 
     async def get_club(self, tag: str):
-        tag = normalize_tag(tag)
-        return await self._get(f"/clubs/%23{tag}", cache_ttl=30)
+        return await self._get(f"/clubs/%23{normalize_tag(tag)}", cache_ttl=60)
 
     async def get_club_members(self, tag: str):
-        tag = normalize_tag(tag)
-        return await self._get(f"/clubs/%23{tag}/members", cache_ttl=30)
+        return await self._get(f"/clubs/%23{normalize_tag(tag)}/members", cache_ttl=60)
 
-    # generic
+    # Generic escape hatch
     async def get(self, path: str, params=None, cache_ttl=0.0):
         if not path.startswith("/"):
             raise ValueError("path must start with '/'")
