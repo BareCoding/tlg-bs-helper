@@ -11,7 +11,6 @@ from .api import (
     BrawlStarsAPI,
     BSAPIError,
     normalize_tag,
-    get_token,
 )
 
 # ---------- helpers ----------
