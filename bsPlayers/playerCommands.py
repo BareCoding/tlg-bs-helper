@@ -6,13 +6,35 @@ import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 
-from .api import (
-    BrawlStarsAPI,
-    BSAPIError,
-    normalize_tag,
-)
+from .api import BrawlStarsAPI, BSAPIError, normalize_tag
 
-# ---------- helpers ----------
+# ---------- pretty helpers ----------
+
+EMO = {
+    "club": "🏛️",
+    "trophy": "🏆",
+    "pb": "📈",
+    "exp": "🎓",
+    "wins3v3": "🛡️",
+    "wins_solo": "💀",
+    "wins_duo": "🔥",
+    "brawler": "🤖",
+    "ok": "✅",
+    "ko": "❌",
+    "draw": "➖",
+    "map": "🗺️",
+    "mode": "🎮",
+}
+
+def zws() -> str:
+    """A tiny blank line spacer inside embeds."""
+    return "\u200b"
+
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
 
 async def _resolve_tag(
     ctx: commands.Context,
@@ -20,13 +42,8 @@ async def _resolve_tag(
     member: Optional[discord.Member],
     user_conf,
 ) -> Tuple[str, discord.Member]:
-    """
-    Priority: explicit tag > mentioned member's first tag > author's first tag.
-    Raises UserFeedbackCheckFailure if no tag can be resolved.
-    """
     if explicit_tag:
         return normalize_tag(explicit_tag), (member or ctx.author)
-
     target = member or ctx.author
     tags: List[str] = await user_conf(target).tags()
     if not tags:
@@ -36,12 +53,104 @@ async def _resolve_tag(
         )
     return tags[0], target
 
+def build_profile_embed(p: dict, use_tag: str, requester: str) -> discord.Embed:
+    name = p.get("name", "?")
+    trophies = p.get("trophies", 0)
+    highest = p.get("highestTrophies", 0)
+    exp_lvl = p.get("expLevel", "?")
+    club_name = (p.get("club") or {}).get("name", "—")
+    solo = p.get("soloVictories", 0)
+    duo = p.get("duoVictories", 0)
+    wins3 = p.get("3vs3Victories", 0)
 
-def _safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        return default
+    # Top brawler block
+    blist = (p.get("brawlers") or [])
+    top_line = "—"
+    if blist:
+        blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
+        b0 = blist[0]
+        top_line = f"**{b0.get('name','?')}** — {b0.get('trophies',0)} {EMO['trophy']} | Power {b0.get('power','?')} | Rank {b0.get('rank','?')}"
+
+    desc = f"{EMO['club']} **Club:** {club_name}"
+    emb = discord.Embed(
+        title=f"{name} (#{use_tag})",
+        description=desc,
+    )
+
+    # Trophies / PB / EXP
+    emb.add_field(name=f"{EMO['trophy']} Trophies", value=f"{trophies}", inline=True)
+    emb.add_field(name=f"{EMO['pb']} Personal Best", value=f"{highest}", inline=True)
+    emb.add_field(name=f"{EMO['exp']} EXP", value=f"{exp_lvl}", inline=True)
+
+    # Spacer
+    emb.add_field(name=zws(), value=zws(), inline=False)
+
+    # Wins
+    emb.add_field(name=f"{EMO['wins3v3']} 3v3 Wins", value=f"{wins3}", inline=True)
+    emb.add_field(name=f"{EMO['wins_solo']} Solo Wins", value=f"{solo}", inline=True)
+    emb.add_field(name=f"{EMO['wins_duo']} Duo Wins", value=f"{duo}", inline=True)
+
+    # Spacer
+    emb.add_field(name=zws(), value=zws(), inline=False)
+
+    emb.add_field(name=f"{EMO['brawler']} Top Brawler", value=top_line, inline=False)
+    emb.set_footer(text=f"Requested by {requester}")
+    return emb
+
+def build_brawlers_embed(p: dict, tag: str, limit: int) -> discord.Embed:
+    blist = (p.get("brawlers") or [])
+    blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
+    n = max(1, min(int(limit or 10), 25))
+    top = blist[:n]
+    if not top:
+        return discord.Embed(title=f"Top Brawlers — #{tag}", description="No brawler data available.")
+
+    lines = []
+    for b in top:
+        lines.append(
+            f"• **{b.get('name','?')}** — {b.get('trophies',0)} {EMO['trophy']} | "
+            f"Power {b.get('power','?')} | Rank {b.get('rank','?')}"
+        )
+    return discord.Embed(title=f"Top Brawlers — #{tag}", description="\n".join(lines))
+
+def _result_emoji(result: str) -> str:
+    r = (result or "").lower()
+    if r == "victory": return EMO["ok"]
+    if r == "defeat":  return EMO["ko"]
+    return EMO["draw"]
+
+def build_battlelog_embed(data: dict, tag: str, limit: int, requester: str) -> discord.Embed:
+    items = data.get("items", [])[: max(1, min(int(limit or 5), 25))]
+    if not items:
+        return discord.Embed(title=f"Battlelog — #{tag}", description="No recent battles found.")
+    lines = []
+    for it in items:
+        evt = it.get("event") or {}
+        mode = (evt.get("mode") or "?").title()
+        mapn = evt.get("map", "—")
+        btl = it.get("battle") or {}
+        res = (btl.get("result") or "—").title()
+        tchange = btl.get("trophyChange")
+        tch = f" ({tchange:+})" if isinstance(tchange, int) else ""
+        # try to find my brawler name
+        my_b = None
+        if "teams" in btl:
+            me = next((pl for team in btl.get("teams", []) for pl in team
+                       if pl.get("tag", "").lstrip("#").upper() == tag.upper()), None)
+            if me:
+                my_b = (me.get("brawler") or {}).get("name")
+        elif "players" in btl:
+            me = next((pl for pl in btl.get("players", [])
+                       if pl.get("tag", "").lstrip("#").upper() == tag.upper()), None)
+            if me:
+                my_b = (me.get("brawler") or {}).get("name")
+        brawler_str = f" — {my_b}" if my_b else ""
+        lines.append(
+            f"{_result_emoji(res)} **{mode}** • {EMO['map']} *{mapn}* — **{res}**{tch}{brawler_str}"
+        )
+    emb = discord.Embed(title=f"Battlelog — #{tag}", description="\n".join(lines))
+    emb.set_footer(text=f"Requested by {requester}")
+    return emb
 
 
 # ---------- cog ----------
@@ -50,7 +159,7 @@ class PlayerCommands(commands.Cog):
     """Player commands for Brawl Stars: tag management, profile, brawlers, battlelog."""
 
     __author__ = "Pat"
-    __version__ = "1.0.1"
+    __version__ = "1.1.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -59,7 +168,7 @@ class PlayerCommands(commands.Cog):
 
     async def _client(self) -> BrawlStarsAPI:
         # Token is pulled from Red's shared API tokens:
-        # [p]set api brawlstars api_key,YOURTOKEN
+        #   [p]set api brawlstars api_key,YOURTOKEN
         return BrawlStarsAPI(self.bot)
 
     # ---------- !tag group ----------
@@ -120,14 +229,7 @@ class PlayerCommands(commands.Cog):
         member: Optional[discord.Member] = None,
         tag: Optional[str] = None,
     ):
-        """
-        Show a player profile.
-        Usage:
-          [p]profile
-          [p]profile @user
-          [p]profile #TAG
-          [p]profile @user #TAG
-        """
+        """Show a player profile (explicit #tag > @user > you)."""
         try:
             use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
         except commands.UserFeedbackCheckFailure as e:
@@ -141,40 +243,7 @@ class PlayerCommands(commands.Cog):
         finally:
             await client.close()
 
-        name = p.get("name", "?")
-        trophies = p.get("trophies", 0)
-        highest = p.get("highestTrophies", 0)
-        exp_lvl = p.get("expLevel", "?")
-        club_name = (p.get("club") or {}).get("name", "—")
-        solo = p.get("soloVictories", 0)
-        duo = p.get("duoVictories", 0)
-        tvv = p.get("3vs3Victories", 0)
-
-        # compute top brawler
-        blist = (p.get("brawlers") or [])
-        top_b = None
-        if blist:
-            blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
-            top_b = blist[0]
-
-        emb = discord.Embed(
-            title=f"{name} (#{use_tag})",
-            description=f"**Club:** {club_name}",
-        )
-        emb.add_field(name="Trophies", value=f"{trophies}", inline=True)
-        emb.add_field(name="PB", value=f"{highest}", inline=True)
-        emb.add_field(name="EXP", value=f"{exp_lvl}", inline=True)
-        emb.add_field(name="3v3 Wins", value=f"{tvv}", inline=True)
-        emb.add_field(name="Solo Wins", value=f"{solo}", inline=True)
-        emb.add_field(name="Duo Wins", value=f"{duo}", inline=True)
-        if top_b:
-            emb.add_field(
-                name="Top Brawler",
-                value=f"{top_b.get('name','?')} — {top_b.get('trophies',0)} 🏆 | "
-                      f"Power {top_b.get('power','?')} | Rank {top_b.get('rank','?')}",
-                inline=False,
-            )
-        emb.set_footer(text=f"Requested by {ctx.author.display_name}")
+        emb = build_profile_embed(p, use_tag, ctx.author.display_name)
         await ctx.send(embed=emb)
 
     # ---------- !brawlers ----------
@@ -188,18 +257,9 @@ class PlayerCommands(commands.Cog):
         tag: Optional[str] = None,
         limit: Optional[int] = 10,
     ):
-        """
-        Show top brawlers by trophies.
-        Usage:
-          [p]brawlers
-          [p]brawlers @user
-          [p]brawlers #TAG
-          [p]brawlers @user #TAG
-        """
-        # allow numeric third arg as limit when member is supplied
+        """Show top brawlers by trophies (explicit #tag > @user > you)."""
         if isinstance(tag, str) and tag.isdigit() and member is not None:
-            limit = int(tag)
-            tag = None
+            limit = int(tag); tag = None
 
         try:
             use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
@@ -214,25 +274,7 @@ class PlayerCommands(commands.Cog):
         finally:
             await client.close()
 
-        blist = (p.get("brawlers") or [])
-        if not blist:
-            return await ctx.send("No brawler data available.")
-        blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
-
-        n = max(1, min(int(limit or 10), 25))
-        top = blist[:n]
-
-        lines = []
-        for b in top:
-            lines.append(
-                f"• **{b.get('name','?')}** — {b.get('trophies',0)} 🏆 | "
-                f"Power {b.get('power','?')} | Rank {b.get('rank','?')}"
-            )
-
-        emb = discord.Embed(
-            title=f"Top Brawlers — #{use_tag}",
-            description="\n".join(lines),
-        )
+        emb = build_brawlers_embed(p, use_tag, limit or 10)
         await ctx.send(embed=emb)
 
     # ---------- !battlelog ----------
@@ -246,17 +288,9 @@ class PlayerCommands(commands.Cog):
         tag: Optional[str] = None,
         limit: Optional[int] = 5,
     ):
-        """
-        Show recent battles.
-        Usage:
-          [p]battlelog
-          [p]battlelog @user
-          [p]battlelog #TAG
-          [p]battlelog @user #TAG
-        """
+        """Show recent battles (explicit #tag > @user > you)."""
         if isinstance(tag, str) and tag.isdigit() and member is not None:
-            limit = int(tag)
-            tag = None
+            limit = int(tag); tag = None
 
         try:
             use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
@@ -271,50 +305,5 @@ class PlayerCommands(commands.Cog):
         finally:
             await client.close()
 
-        items = data.get("items", [])[: max(1, min(int(limit or 5), 25))]
-        if not items:
-            return await ctx.send("No recent battles found.")
-
-        lines = []
-        for it in items:
-            evt = it.get("event") or {}
-            mode = (evt.get("mode") or "?").title()
-            mapn = evt.get("map", "—")
-            btl = it.get("battle") or {}
-
-            res = (btl.get("result") or "—").title()
-            tchange = btl.get("trophyChange")
-            tch = f" ({tchange:+})" if isinstance(tchange, int) else ""
-
-            # try to show played brawler if present
-            brawler_name = None
-            if "teams" in btl:
-                # 3v3: teams -> list[list[player]]
-                me = next(
-                    (pl for team in btl.get("teams", []) for pl in team if pl.get("tag", "").lstrip("#").upper() == use_tag),
-                    None
-                )
-                if me:
-                    bn = (me.get("brawler") or {}).get("name")
-                    if bn:
-                        brawler_name = bn
-            elif "players" in btl:
-                # solo/duo: players -> list[player]
-                me = next(
-                    (pl for pl in btl.get("players", []) if pl.get("tag", "").lstrip("#").upper() == use_tag),
-                    None
-                )
-                if me:
-                    bn = (me.get("brawler") or {}).get("name")
-                    if bn:
-                        brawler_name = bn
-
-            brawler_str = f" — {brawler_name}" if brawler_name else ""
-            lines.append(f"• **{mode}** on *{mapn}*: **{res}**{tch}{brawler_str}")
-
-        emb = discord.Embed(
-            title=f"Battlelog — #{use_tag}",
-            description="\n".join(lines),
-        )
-        emb.set_footer(text=f"Requested by {ctx.author.display_name}")
+        emb = build_battlelog_embed(data, use_tag, limit or 5, ctx.author.display_name)
         await ctx.send(embed=emb)
