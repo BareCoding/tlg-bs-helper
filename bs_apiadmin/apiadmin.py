@@ -2,7 +2,7 @@ from __future__ import annotations
 import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
-from .bs_shared import BrawlStarsAPI, normalize_tag, BSAPIError
+from bs_shared import BrawlStarsAPI, normalize_tag, BSAPIError
 
 class BSAPIAdmin(commands.Cog):
     """Admin & smoke-test commands for the Brawl Stars API."""
