@@ -303,7 +303,7 @@ class PlayerCommands(commands.Cog):
                 except BSAPIError:
                     pass
         except BSAPIError as e:
-            return await ctx.send(embed=discord.Embed(title="API error", description=str(e), color=COLOR_BAD)))
+            return await ctx.send(embed=discord.Embed(title="API error", description=str(e), color=COLOR_BAD))
         finally:
             await client.close()
 
