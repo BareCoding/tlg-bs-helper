@@ -281,3 +281,88 @@ class PlayerCommands(commands.Cog):
 
         emb.set_footer(text=f"Requested by {ctx.author.display_name}")
         await ctx.send(embed=emb)
+
+    @commands.command(name="brawlers")
+    @commands.guild_only()
+    async def brawlers(
+        self,
+        ctx: commands.Context,
+        member: Optional[discord.Member] = None,
+        tag: Optional[str] = None,
+        limit: Optional[int] = 10,
+    ):
+        """
+        Show each brawler as a stacked block with CDN-style emoji icons (via custom emoji bindings).
+        Use `[p]bsemoji set <key> <emoji>` to bind CDN-uploaded emojis to keys: trophy, power, rank, sp, gadget, gear, coin, pp.
+        """
+        # numeric 3rd arg as limit when member provided
+        if isinstance(tag, str) and tag.isdigit() and member is not None:
+            limit = int(tag); tag = None
+    
+        # resolve tag (explicit > member > author)
+        try:
+            use_tag, _ = await self._resolve_tag(ctx, tag, member)
+        except commands.UserFeedbackCheckFailure as e:
+            return await ctx.send(embed=discord.Embed(title="Missing tag", description=str(e), color=discord.Color.orange()))
+    
+        client = await self._client()
+        try:
+            p = await client.get_player(use_tag)
+        except BSAPIError as e:
+            return await ctx.send(embed=discord.Embed(title="API error", description=str(e), color=discord.Color.red()))
+        finally:
+            await client.close()
+    
+        blist = p.get("brawlers") or []
+        if not blist:
+            return await ctx.send(embed=discord.Embed(title="Brawlers", description="No data available.", color=discord.Color.orange()))
+    
+        # sort & slice
+        blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
+        n = max(1, min(int(limit or 10), 25))
+        data = blist[:n]
+    
+        # emoji fetchers (use server-bound custom emojis if available)
+        TROPHY = await _emo_str(ctx, "trophy")
+        POWER  = await _emo_str(ctx, "power")
+        RANK   = await _emo_str(ctx, "rank")
+        SP     = await _emo_str(ctx, "sp")
+        GADG   = await _emo_str(ctx, "gadget")
+        GEAR   = await _emo_str(ctx, "gear")
+    
+        # Build a dense but clean card-style list
+        lines: list[str] = []
+        thumb_url = None
+        for b in data:
+            if thumb_url is None and "id" in b:
+                # show first brawler as thumbnail
+                thumb_url = f"https://cdn.brawlify.com/brawlers/borderless/{int(b['id'])}.png"
+    
+            name = b.get("name", "?")
+            tr = _safe_int(b.get("trophies", 0))
+            pb = _safe_int(b.get("highestTrophies", tr))
+            pw = _safe_int(b.get("power", 0))
+            rk = _safe_int(b.get("rank", 0))
+    
+            # counts
+            sp_count   = len(b.get("starPowers") or [])
+            gadg_count = len(b.get("gadgets") or [])
+            gear_count = len(b.get("gears") or [])
+    
+            # Each block: name + line of stats + abilities line
+            lines.append(
+                f"**{name}**\n"
+                f"{TROPHY} {tr}  ·  PB {pb}  ·  {POWER} {pw}  ·  {RANK} {rk}\n"
+                f"{SP} {sp_count}  ·  {GADG} {gadg_count}  ·  {GEAR} {gear_count}\n"
+            )
+    
+        # Compose embed
+        emb = discord.Embed(
+            title=f"{p.get('name','?')} (#{use_tag})",
+            description="**Brawler list — Sorted by highest trophies**\n\n" + "\n".join(lines),
+            color=discord.Color.from_rgb(52, 152, 219),
+        )
+        if thumb_url:
+            emb.set_thumbnail(url=thumb_url)
+        emb.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=emb)
