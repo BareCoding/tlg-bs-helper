@@ -1,62 +1,47 @@
 from __future__ import annotations
-from typing import List, Optional, Tuple
 import discord
 from redbot.core import commands, Config
-from redbot.core.bot import Red
-
+from typing import Optional, List, Tuple
 from .api import BrawlStarsAPI, BSAPIError, normalize_tag
 
-CDN = "https://cdn.brawlify.com"
+CDN_BASE = "https://cdn.brawlify.com"
 
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
 
-# ---------- CDN Helpers ----------
-
-def brawler_image_url(brawler_id: int, borderless: bool = True) -> str:
-    style = "borderless" if borderless else "borders"
-    return f"{CDN}/brawlers/{style}/{brawler_id}.png"
-
-def profile_icon_url(icon_id: int) -> str:
-    return f"{CDN}/profile-icons/{icon_id}.png"
-
-# ---------- Utilities ----------
-
-async def _resolve_tag(
-    ctx: commands.Context,
-    explicit_tag: Optional[str],
-    member: Optional[discord.Member],
-    user_conf,
-) -> Tuple[str, discord.Member]:
-    if explicit_tag:
-        return normalize_tag(explicit_tag), (member or ctx.author)
-
-    target = member or ctx.author
-    tags: List[str] = await user_conf(target).tags()
-    if not tags:
-        raise commands.UserFeedbackCheckFailure(
-            f"No saved tags for **{target.display_name}**.\n"
-            f"Use `{ctx.clean_prefix}tag verify #YOURTAG` or provide a #tag."
-        )
-    return tags[0], target
-
-
-# ---------- Cog ----------
+def brawler_icon_url(brawler: dict) -> str:
+    """Builds a brawler icon URL using the brawler ID from the API."""
+    brawler_id = brawler.get("id")
+    if brawler_id:
+        return f"{CDN_BASE}/brawlers/{brawler_id}.png"
+    return f"{CDN_BASE}/brawlers/16000000.png"
 
 class PlayerCommands(commands.Cog):
-    """Player commands for Brawl Stars: tag management, profile, brawlers, battlelog."""
-
-    def __init__(self, bot: Red):
+    def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xB51A11, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xB51A11)
         self.config.register_user(tags=[])
 
-    async def _client(self) -> BrawlStarsAPI:
+    async def _client(self):
+        keys = await self.bot.get_shared_api_tokens("brawlstars")
+        if not keys or "api_key" not in keys:
+            raise commands.UserFeedbackCheckFailure("API key not set. Use `[p]set api brawlstars api_key,YOURTOKEN`.")
         return BrawlStarsAPI(self.bot)
 
-    # ---------- Tag Commands ----------
+    async def _resolve_tag(self, ctx, tag: Optional[str], member: Optional[discord.Member]) -> Tuple[str, discord.Member]:
+        if tag:
+            return normalize_tag(tag), member or ctx.author
+        target = member or ctx.author
+        tags = await self.config.user(target).tags()
+        if not tags:
+            raise commands.UserFeedbackCheckFailure(f"No saved tags for {target.display_name}. Use `{ctx.clean_prefix}tag verify #YOURTAG`.")
+        return tags[0], target
 
     @commands.group(name="tag", invoke_without_command=True)
     async def tag_group(self, ctx: commands.Context):
-        """Manage your saved Brawl Stars tags."""
         await ctx.send_help()
 
     @tag_group.command(name="verify")
@@ -64,26 +49,13 @@ class PlayerCommands(commands.Cog):
         tag = normalize_tag(tag)
         client = await self._client()
         try:
-            pdata = await client.get_player(tag)
+            player = await client.get_player(tag)
         except BSAPIError as e:
-            return await ctx.send(f"❌ Invalid tag or API error: {e}")
-        finally:
-            await client.close()
-
+            return await ctx.send(f"❌ Error: {e}")
         async with self.config.user(ctx.author).tags() as tags:
             if tag not in tags:
                 tags.append(tag)
-
-        await ctx.send(
-            embed=discord.Embed(
-                title="✅ Tag Verified",
-                description=(
-                    f"**{pdata.get('name','?')}** (#{tag})\n"
-                    f"Trophies: **{pdata.get('trophies', 0)}**"
-                ),
-                color=discord.Color.green()
-            ).set_footer(text=f"Saved for {ctx.author.display_name}")
-        )
+        await ctx.send(f"✅ Verified **{player.get('name')}** (#{tag}) and saved.")
 
     @tag_group.command(name="remove")
     async def tag_remove(self, ctx: commands.Context, tag: str):
@@ -91,139 +63,118 @@ class PlayerCommands(commands.Cog):
         async with self.config.user(ctx.author).tags() as tags:
             if tag in tags:
                 tags.remove(tag)
-                return await ctx.send(embed=discord.Embed(
-                    description=f"🗑️ Removed tag `#{tag}`.",
-                    color=discord.Color.orange()
-                ))
-        await ctx.send("That tag isn’t saved on your account.")
+                return await ctx.send(f"🗑️ Removed tag #{tag}.")
+        await ctx.send("That tag isn’t saved.")
 
     @tag_group.command(name="list")
     async def tag_list(self, ctx: commands.Context, user: Optional[discord.Member] = None):
         user = user or ctx.author
         tags = await self.config.user(user).tags()
         if not tags:
-            return await ctx.send(f"No tags saved for **{user.display_name}**.")
-        await ctx.send(
-            embed=discord.Embed(
-                title=f"{user.display_name}'s Tags",
-                description="\n".join(f"• `#{t}`" for t in tags),
-                color=discord.Color.blue()
-            )
-        )
+            return await ctx.send(f"No tags saved for {user.display_name}.")
+        await ctx.send(f"**{user.display_name}'s Tags:**\n" + ", ".join(f"#{t}" for t in tags))
 
-    # ---------- Profile Command ----------
-
-    @commands.command(name="profile")
+    @commands.command()
     async def profile(self, ctx, member: Optional[discord.Member] = None, tag: Optional[str] = None):
         try:
-            use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
-        except commands.UserFeedbackCheckFailure as e:
-            return await ctx.send(str(e))
+            use_tag, who = await self._resolve_tag(ctx, tag, member)
+            client = await self._client()
+            player = await client.get_player(use_tag)
+        except Exception as e:
+            return await ctx.send(f"⚠️ {e}")
 
-        client = await self._client()
-        try:
-            p = await client.get_player(use_tag)
-        except BSAPIError as e:
-            return await ctx.send(f"API error: {e}")
-        finally:
-            await client.close()
+        brawlers = player.get("brawlers", [])
+        brawlers.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
+        top_brawler = brawlers[0] if brawlers else None
 
-        icon_url = profile_icon_url(p.get("icon", {}).get("id", 28000000))
-        name = p.get("name", "?")
-        emb = discord.Embed(
-            title=f"{name} (#{use_tag})",
-            description=f"🏅 **Club:** {p.get('club', {}).get('name', '—')}",
-            color=discord.Color.gold()
+        embed = discord.Embed(
+            title=f"{player.get('name')} (#{use_tag})",
+            description=f"🏅 Club: {player.get('club', {}).get('name', '—')}",
+            color=discord.Color.gold(),
         )
-        emb.add_field(name="Trophies", value=p.get("trophies", 0))
-        emb.add_field(name="PB", value=p.get("highestTrophies", 0))
-        emb.add_field(name="EXP Level", value=p.get("expLevel", "?"))
-        emb.add_field(name="3v3 Wins", value=p.get("3vs3Victories", 0))
-        emb.add_field(name="Solo Wins", value=p.get("soloVictories", 0))
-        emb.add_field(name="Duo Wins", value=p.get("duoVictories", 0))
+        embed.add_field(name="Trophies", value=player.get("trophies", "—"))
+        embed.add_field(name="PB", value=player.get("highestTrophies", "—"))
+        embed.add_field(name="EXP Level", value=player.get("expLevel", "—"))
+        embed.add_field(name="3v3 Wins", value=player.get("3vs3Victories", 0))
+        embed.add_field(name="Solo Wins", value=player.get("soloVictories", 0))
+        embed.add_field(name="Duo Wins", value=player.get("duoVictories", 0))
 
-        top_b = sorted(p.get("brawlers", []), key=lambda b: b.get("trophies", 0), reverse=True)[0]
-        emb.add_field(
-            name="Top Brawler",
-            value=f"**{top_b['name']}** — {top_b['trophies']} 🏆\n"
-                  f"Power {top_b['power']} | Rank {top_b['rank']}",
-            inline=False
-        )
-        emb.set_thumbnail(url=brawler_image_url(top_b["id"]))
-        emb.set_footer(text=f"Requested by {ctx.author.display_name}")
-        await ctx.send(embed=emb)
+        if top_brawler:
+            embed.add_field(
+                name="Top Brawler",
+                value=f"**{top_brawler['name']}** — {top_brawler['trophies']} 🏆\n"
+                      f"Power {top_brawler.get('power', '?')} | Rank {top_brawler.get('rank', '?')}",
+                inline=False,
+            )
+            embed.set_thumbnail(url=brawler_icon_url(top_brawler))
 
-    # ---------- Brawlers Command ----------
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
 
-    @commands.command(name="brawlers")
-    async def brawlers(self, ctx, member: Optional[discord.Member] = None, tag: Optional[str] = None):
+    @commands.command()
+    async def brawlers(self, ctx, member: Optional[discord.Member] = None, tag: Optional[str] = None, limit: Optional[int] = 10):
         try:
-            use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
-        except commands.UserFeedbackCheckFailure as e:
-            return await ctx.send(str(e))
+            use_tag, who = await self._resolve_tag(ctx, tag, member)
+            client = await self._client()
+            player = await client.get_player(use_tag)
+        except Exception as e:
+            return await ctx.send(f"⚠️ {e}")
 
-        client = await self._client()
-        try:
-            p = await client.get_player(use_tag)
-        except BSAPIError as e:
-            return await ctx.send(f"API error: {e}")
-        finally:
-            await client.close()
+        brawlers = player.get("brawlers", [])
+        brawlers.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
+        top_brawlers = brawlers[:max(1, min(limit or 10, 25))]
 
-        blist = sorted(p.get("brawlers", []), key=lambda b: b.get("trophies", 0), reverse=True)
-        if not blist:
-            return await ctx.send("No brawlers found.")
-
-        desc = "\n".join(
-            f"**{b['name']}** — {b['trophies']} 🏆 | Power {b['power']} | Rank {b['rank']}"
-            for b in blist[:10]
+        embed = discord.Embed(
+            title=f"{player.get('name')}'s Top Brawlers",
+            description="\n".join([
+                f"**{b['name']}** — {b['trophies']} 🏆 | Power {b['power']} | Rank {b['rank']}"
+                for b in top_brawlers
+            ]),
+            color=discord.Color.purple(),
         )
 
-        emb = discord.Embed(
-            title=f"{p.get('name')}’s Top Brawlers",
-            description=desc,
-            color=discord.Color.purple()
-        )
-        emb.set_footer(text=f"#{use_tag}")
-        emb.set_thumbnail(url=brawler_image_url(blist[0]["id"]))
-        await ctx.send(embed=emb)
+        if top_brawlers:
+            embed.set_thumbnail(url=brawler_icon_url(top_brawlers[0]))
 
-    # ---------- Battlelog Command ----------
+        embed.set_footer(text=f"#{use_tag}")
+        await ctx.send(embed=embed)
 
-    @commands.command(name="battlelog")
-    async def battlelog(self, ctx, member: Optional[discord.Member] = None, tag: Optional[str] = None):
+    @commands.command()
+    async def battlelog(self, ctx, member: Optional[discord.Member] = None, tag: Optional[str] = None, limit: Optional[int] = 5):
         try:
-            use_tag, who = await _resolve_tag(ctx, tag, member, self.config.user)
-        except commands.UserFeedbackCheckFailure as e:
-            return await ctx.send(str(e))
-
-        client = await self._client()
-        try:
+            use_tag, who = await self._resolve_tag(ctx, tag, member)
+            client = await self._client()
             log = await client.get_player_battlelog(use_tag)
-        except BSAPIError as e:
-            return await ctx.send(f"API error: {e}")
-        finally:
-            await client.close()
+        except Exception as e:
+            return await ctx.send(f"⚠️ {e}")
 
-        battles = log.get("items", [])[:5]
-        if not battles:
-            return await ctx.send("No recent battles.")
+        entries = log.get("items", [])[:max(1, min(limit or 5, 25))]
+        if not entries:
+            return await ctx.send("No recent battles found.")
 
         lines = []
-        for b in battles:
-            battle = b.get("battle", {})
-            result = battle.get("result", "N/A")
-            mode = (b.get("event") or {}).get("mode", "Unknown").title()
-            mapname = (b.get("event") or {}).get("map", "Unknown")
-            trophy_change = battle.get("trophyChange", 0)
-            lines.append(
-                f"**{mode}** on *{mapname}* — {result.title()} ({trophy_change:+})"
+        for match in entries:
+            evt = match.get("event", {})
+            btl = match.get("battle", {})
+            mode = evt.get("mode", "?").title()
+            result = btl.get("result", "?").title()
+            trophy_change = btl.get("trophyChange")
+            brawler_name = next(
+                (
+                    (pl.get("brawler") or {}).get("name")
+                    for team in btl.get("teams", [])
+                    for pl in team
+                    if normalize_tag(pl.get("tag", "")) == use_tag
+                ),
+                "Unknown"
             )
+            tch = f" ({trophy_change:+})" if isinstance(trophy_change, int) else ""
+            lines.append(f"• **{mode}** on *{evt.get('map', '—')}* — {result}{tch} as {brawler_name}")
 
-        emb = discord.Embed(
-            title=f"Recent Battles — #{use_tag}",
+        embed = discord.Embed(
+            title=f"Battlelog — #{use_tag}",
             description="\n".join(lines),
-            color=discord.Color.blurple()
+            color=discord.Color.dark_green(),
         )
-        emb.set_footer(text=f"Requested by {ctx.author.display_name}")
-        await ctx.send(embed=emb)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
