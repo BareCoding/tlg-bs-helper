@@ -19,6 +19,10 @@ COLOR_GOOD    = discord.Color.from_rgb(46, 204, 113)   # green
 COLOR_WARN    = discord.Color.from_rgb(241, 196, 15)   # yellow
 COLOR_BAD     = discord.Color.from_rgb(231, 76, 60)    # red
 
+BULLET_OK  = "🟩"
+BULLET_BAD = "🟥"
+BULLET_NEU = "🟨"
+
 def _safe_int(v, default=0):
     try:
         return int(v)
@@ -66,10 +70,10 @@ def _fmt_brawler_line(b: dict) -> str:
 # Cog
 # =========================
 class PlayerCommands(commands.Cog):
-    """Brawl Stars — tags, player profile, brawlers, and battlelog with clean embeds."""
+    """Brawl Stars — user commands with polished, consistent embeds."""
 
     __author__  = "Pat"
-    __version__ = "3.0.0"
+    __version__ = "3.2.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -227,7 +231,7 @@ class PlayerCommands(commands.Cog):
         member: Optional[discord.Member] = None,
         tag: Optional[str] = None,
     ):
-        """Detailed player profile with stacked sections and deltas."""
+        """Detailed player profile with stacked sections and trophy deltas."""
         try:
             use_tag, _ = await self._resolve_tag(ctx, tag, member)
         except commands.UserFeedbackCheckFailure as e:
@@ -242,12 +246,12 @@ class PlayerCommands(commands.Cog):
         finally:
             await client.close()
 
-        # Latest battle time for "last seen"
+        # Last seen (from freshest battle)
         latest_time = None
         for item in blog.get("items", [])[:1]:
             latest_time = _parse_battletime(item.get("battleTime"))
 
-        # Brawlers summary
+        # Brawlers (for stats + top)
         blist = (p.get("brawlers") or [])
         blist.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
         top_b = blist[0] if blist else None
@@ -271,12 +275,12 @@ class PlayerCommands(commands.Cog):
         week_delta  = trophies - _safe_int(entry.get("week_base", trophies))
         last_seen_txt = _ago(dt.datetime.fromisoformat(entry["last_seen"])) if entry.get("last_seen") else "—"
 
-        # Build embed (no inline fields)
         name = p.get("name", "?")
         club_name = (p.get("club") or {}).get("name", "—")
         emb = discord.Embed(title=f"{name} (#{use_tag})", color=COLOR_PRIMARY)
         emb.set_author(name=club_name)
 
+        # Overview
         emb.add_field(
             name="Overview",
             value=(
@@ -287,33 +291,33 @@ class PlayerCommands(commands.Cog):
             ),
             inline=False,
         )
-
+        # Progress
         emb.add_field(
             name="Trophy Progression",
             value=f"**Today:** {today_delta:+}\n**Week:** {week_delta:+}",
             inline=False,
         )
-
+        # Wins
         emb.add_field(
             name="Wins",
             value=(
-                f"**3v3 Wins:** {p.get('3vs3Victories', 0)}\n"
-                f"**Solo Wins:** {p.get('soloVictories', 0)}\n"
-                f"**Duo Wins:** {p.get('duoVictories', 0)}"
+                f"**3v3:** {p.get('3vs3Victories', 0)}\n"
+                f"**Solo:** {p.get('soloVictories', 0)}\n"
+                f"**Duo:** {p.get('duoVictories', 0)}"
             ),
             inline=False,
         )
-
+        # Brawlers
         emb.add_field(
             name="Brawlers",
             value=(
                 f"**Collected:** {have_cnt}/{total_brawlers}\n"
                 f"**Power 11:** {p11_cnt}\n"
-                f"**Average Trophies (owned):** {avg_bt}"
+                f"**Avg Trophies (owned):** {avg_bt}"
             ),
             inline=False,
         )
-
+        # Top brawler
         if top_b:
             emb.add_field(
                 name="Top Brawler",
@@ -323,8 +327,7 @@ class PlayerCommands(commands.Cog):
                 ),
                 inline=False,
             )
-
-            # Optional short "Top Picks" row
+            # Short picks row
             picks = []
             for b in blist[:6]:
                 picks.append(
@@ -387,10 +390,8 @@ class PlayerCommands(commands.Cog):
         cur, cur_len = [], 0
         for line in lines:
             if cur_len + len(line) + 1 > 3500:
-                chunks.append(cur)
-                cur, cur_len = [], 0
-            cur.append(line)
-            cur_len += len(line) + 1
+                chunks.append(cur); cur, cur_len = [], 0
+            cur.append(line); cur_len += len(line) + 1
         if cur:
             chunks.append(cur)
 
@@ -436,7 +437,7 @@ class PlayerCommands(commands.Cog):
         if not items:
             return await ctx.send(embed=discord.Embed(title="Battlelog", description="No recent battles found.", color=COLOR_WARN))
 
-        # Also update "last seen" baseline using freshest item
+        # Update "last seen" baseline using freshest item
         latest_time = None
         for item in items[:1]:
             latest_time = _parse_battletime(item.get("battleTime"))
@@ -475,7 +476,7 @@ class PlayerCommands(commands.Cog):
             elif res.lower() == "defeat": losses += 1
             else: draws += 1
 
-            bullet = "🟩" if res.lower() == "victory" else "🟥" if res.lower() == "defeat" else "🟨"
+            bullet = BULLET_OK if res.lower() == "victory" else BULLET_BAD if res.lower() == "defeat" else BULLET_NEU
             lines.append(f"{bullet} **{mode}** • *{mapn}* — **{res}**{tchs}{btxt}{when_s}")
 
         summary = f"**W/L/D:** {wins}/{losses}/{draws}"
@@ -504,24 +505,17 @@ class PlayerCommands(commands.Cog):
           [p]compare #TAG1 #TAG2
           [p]compare @user #TAG
         """
-        # --- helpers (local) ---
         def _is_tag(s: Optional[str]) -> bool:
-            return isinstance(s, str) and s.strip().lstrip("#").replace("O", "0").isalnum() and s.strip().startswith("#")
+            return isinstance(s, str) and s.strip().startswith("#")
 
         def _member_for_position(pos: int) -> Optional[discord.Member]:
-            # use actual mentions from the message to be robust
+            # use actual mentions from the message
             if pos < len(ctx.message.mentions):
                 return ctx.message.mentions[pos]
             return None
 
         async def _tag_for_subject(arg: Optional[str], mention: Optional[discord.Member], default_to_author: bool) -> Tuple[str, Optional[discord.Member]]:
-            """
-            Resolve a subject to a tag.
-            Priority per subject:
-              - explicit #TAG
-              - mentioned member's first saved tag
-              - (optional) author's first saved tag
-            """
+            """Resolve a subject to a tag."""
             if _is_tag(arg):
                 return normalize_tag(arg), mention
             if mention:
@@ -540,11 +534,6 @@ class PlayerCommands(commands.Cog):
                     )
             raise commands.UserFeedbackCheckFailure("Could not resolve a player for comparison.")
 
-        # ---- parse subjects ----
-        # Strategy:
-        # - If two inputs given → resolve both.
-        # - If one input → a = YOU, b = input.
-        # - If inputs missing → error.
         if not first and not second:
             return await ctx.send(embed=discord.Embed(
                 title="Compare",
@@ -552,41 +541,35 @@ class PlayerCommands(commands.Cog):
                             f"`{ctx.clean_prefix}compare @user`\n"
                             f"`{ctx.clean_prefix}compare #TAG`\n"
                             f"`{ctx.clean_prefix}compare @user1 @user2`",
-                color=discord.Color.orange(),
+                color=COLOR_WARN,
             ))
 
         if second is None:
-            # Compare YOU vs target(first)
             a_tag, a_member = await _tag_for_subject(None, None, default_to_author=True)
             b_tag, b_member = await _tag_for_subject(first, _member_for_position(0), default_to_author=False)
         else:
-            # Compare target(first) vs target(second)
             a_tag, a_member = await _tag_for_subject(first, _member_for_position(0), default_to_author=False)
             b_tag, b_member = await _tag_for_subject(second, _member_for_position(1), default_to_author=False)
 
-        # Prevent accidental identical comparison
         if a_tag == b_tag:
             return await ctx.send(embed=discord.Embed(
                 title="Compare",
                 description="Those two resolve to the **same** player. Provide two different targets.",
-                color=discord.Color.orange(),
+                color=COLOR_WARN,
             ))
 
-        # ---- fetch both players ----
         client = await self._client()
         try:
-            # sequential; small endpoints, keeps it simple
             A = await client.get_player(a_tag)
             B = await client.get_player(b_tag)
         except BSAPIError as e:
-            return await ctx.send(embed=discord.Embed(title="API error", description=str(e), color=discord.Color.red()))
+            return await ctx.send(embed=discord.Embed(title="API error", description=str(e), color=COLOR_BAD))
         finally:
             try:
                 await client.close()
             except Exception:
                 pass
 
-        # ---- compute summaries ----
         def _summ(p: Dict[str, Any]) -> Dict[str, Any]:
             bl = p.get("brawlers") or []
             bl.sort(key=lambda b: _safe_int(b.get("trophies", 0)), reverse=True)
@@ -598,76 +581,52 @@ class PlayerCommands(commands.Cog):
                 "trophies": _safe_int(p.get("trophies", 0)),
                 "pb": _safe_int(p.get("highestTrophies", 0)),
                 "exp": _safe_int(p.get("expLevel", 0)),
-                "wins_3v3": _safe_int(p.get("3vs3Victories", 0)),
-                "wins_solo": _safe_int(p.get("soloVictories", 0)),
-                "wins_duo": _safe_int(p.get("duoVictories", 0)),
-                "top_name": top.get("name") if top else None,
-                "top_tr": _safe_int(top.get("trophies", 0)) if top else None,
-                "top_pow": _safe_int(top.get("power", 0)) if top else None,
-                "top_rank": _safe_int(top.get("rank", 0)) if top else None,
+                "w3": _safe_int(p.get("3vs3Victories", 0)),
+                "ws": _safe_int(p.get("soloVictories", 0)),
+                "wd": _safe_int(p.get("duoVictories", 0)),
+                "top": (
+                    f"{top.get('name')} — { _safe_int(top.get('trophies',0)) } 🏆 · "
+                    f"P{_safe_int(top.get('power',0))} · R{_safe_int(top.get('rank',0))}"
+                ) if top else "—",
             }
 
-        SA = _summ(A)
-        SB = _summ(B)
+        SA = _summ(A); SB = _summ(B)
 
-        # diffs (A - B)
         def diff(a: int, b: int) -> str:
-            d = a - b
-            return f"{d:+}"
+            return f"{a - b:+}"
 
-        # ---- build embed (stacked sections, no inline) ----
         title = f"Compare — {SA['name']} (#{a_tag}) vs {SB['name']} (#{b_tag})"
-        emb = discord.Embed(title=title, color=discord.Color.blurple())
+        emb = discord.Embed(title=title, color=COLOR_PRIMARY)
 
-        # Overview section
         emb.add_field(
-            name="Overview",
+            name="Overview A",
             value=(
-                f"**A:** {SA['name']} — `#{a_tag}`\n"
+                f"**Name/Tag:** {SA['name']} — `#{a_tag}`\n"
+                f"**Club:** {SA['club']}\n"
                 f"**Trophies:** {SA['trophies']}  |  **PB:** {SA['pb']}  |  **EXP:** {SA['exp']}\n"
-                f"**Club:** {SA['club']}\n\n"
-                f"**B:** {SB['name']} — `#{b_tag}`\n"
-                f"**Trophies:** {SB['trophies']}  |  **PB:** {SB['pb']}  |  **EXP:** {SB['exp']}\n"
-                f"**Club:** {SB['club']}"
+                f"**Top:** {SA['top']}"
             ),
             inline=False,
         )
-
-        # Wins section
         emb.add_field(
-            name="Wins",
+            name="Overview B",
             value=(
-                f"**A:** 3v3 {SA['wins_3v3']}  ·  Solo {SA['wins_solo']}  ·  Duo {SA['wins_duo']}\n"
-                f"**B:** 3v3 {SB['wins_3v3']}  ·  Solo {SB['wins_solo']}  ·  Duo {SB['wins_duo']}"
+                f"**Name/Tag:** {SB['name']} — `#{b_tag}`\n"
+                f"**Club:** {SB['club']}\n"
+                f"**Trophies:** {SB['trophies']}  |  **PB:** {SB['pb']}  |  **EXP:** {SB['exp']}\n"
+                f"**Top:** {SB['top']}"
             ),
             inline=False,
         )
-
-        # Top brawler section
-        A_top_line = (
-            f"{SA['top_name']} — {SA['top_tr']} 🏆 · P{SA['top_pow']} · R{SA['top_rank']}"
-            if SA["top_name"] else "—"
-        )
-        B_top_line = (
-            f"{SB['top_name']} — {SB['top_tr']} 🏆 · P{SB['top_pow']} · R{SB['top_rank']}"
-            if SB["top_name"] else "—"
-        )
-        emb.add_field(
-            name="Top Brawler",
-            value=f"**A:** {A_top_line}\n**B:** {B_top_line}",
-            inline=False,
-        )
-
-        # Diffs section (A − B)
         emb.add_field(
             name="Diffs (A − B)",
             value=(
                 f"**Trophies:** {diff(SA['trophies'], SB['trophies'])}\n"
                 f"**PB:** {diff(SA['pb'], SB['pb'])}\n"
                 f"**EXP:** {diff(SA['exp'], SB['exp'])}\n"
-                f"**3v3 Wins:** {diff(SA['wins_3v3'], SB['wins_3v3'])}\n"
-                f"**Solo Wins:** {diff(SA['wins_solo'], SB['wins_solo'])}\n"
-                f"**Duo Wins:** {diff(SA['wins_duo'], SB['wins_duo'])}"
+                f"**3v3 Wins:** {diff(SA['w3'], SB['w3'])}\n"
+                f"**Solo Wins:** {diff(SA['ws'], SB['ws'])}\n"
+                f"**Duo Wins:** {diff(SA['wd'], SB['wd'])}"
             ),
             inline=False,
         )
