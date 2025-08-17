@@ -61,7 +61,7 @@ class BSInfo(commands.Cog):
     def __init__(self, bot: Red):
         self.bot = bot
         # Tag store replaces the old Players cog config
-        self.config = Config.get_conf(self, identifier=0xB51NF0, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xB51F0C, force_registration=True)
         default_user = {"tags": [], "default_index": 0, "ign_cache": "", "club_tag_cache": ""}
         self.config.register_user(**default_user)
         self._apis: Dict[int, BrawlStarsAPI] = {}
