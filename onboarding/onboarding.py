@@ -11,6 +11,7 @@ from redbot.core.bot import Red
 import discord
 from typing import Optional, Dict, Any, List, Tuple
 
+from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import tag_pretty, club_badge_url
@@ -37,7 +38,6 @@ class TagSelect(discord.ui.Select):
         await interaction.response.defer()
         view.stop()
 
-
 class TagSelectView(discord.ui.View):
     def __init__(self, author_id: int, saved_tags: List[str], timeout: int = 180):
         super().__init__(timeout=timeout)
@@ -47,7 +47,6 @@ class TagSelectView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
-
 
 class ClubPickButton(discord.ui.Button):
     def __init__(self, index: int, label: str):
@@ -60,7 +59,6 @@ class ClubPickButton(discord.ui.Button):
             view.selected = view.options[self.index - 1]
             await interaction.response.defer()
             view.stop()
-
 
 class ClubPickView(discord.ui.View):
     def __init__(self, author_id: int, options: List[Tuple[str, Dict[str, Any]]], timeout: int = 180):
@@ -82,22 +80,13 @@ class ClubPickView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
-
 class Onboarding(commands.Cog):
-    """
-    Application flow in DMs:
-    - choose/validate tag (using BSInfo tag store)
-    - show eligible clubs (LIVE member counts from official API)
-    - skip full clubs (>= 30 members)
-    - if all full: DM applicant + ping BS Club Leadership in notify channel
-    """
+    """Onboarding flow in DMs (with full/under-req fail-safes and leadership pings)."""
 
     def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0x0B0ABD, force_registration=True)
-        default_guild = {
-            "apply_notify_channel_id": None,
-        }
+        default_guild = {"apply_notify_channel_id": None}
         default_member = {"pending_club_tag": None}
         self.config.register_guild(**default_guild)
         self.config.register_member(**default_member)
@@ -117,7 +106,8 @@ class Onboarding(commands.Cog):
         pass
 
     @onboarding.command()
-    @commands.has_guild_permissions(manage_guild=True)
+    @commands.guild_only()
+    @bs_admin_check()
     async def setnotify(self, ctx, channel: discord.TextChannel):
         """Set the channel where application notifications are posted."""
         await self.config.guild(ctx.guild).apply_notify_channel_id.set(channel.id)
@@ -126,9 +116,6 @@ class Onboarding(commands.Cog):
 
     # PUBLIC entrypoint called by BSInfo: runs fully in DMs
     async def start_application_dm(self, guild: discord.Guild, member: discord.Member):
-        """
-        Start the application with the user in DMs.
-        """
         if guild is None:
             return
         try:
@@ -156,8 +143,10 @@ class Onboarding(commands.Cog):
             view = TagSelectView(member.id, saved)
             msg = await dm.send(embed=emb, view=view)
             await view.wait()
-            try: await msg.edit(view=None)
-            except: pass
+            try:
+                await msg.edit(view=None)
+            except Exception:
+                pass
             if view.choice is None:
                 return await dm.send(embed=discord.Embed(title="Timed out", color=ERROR))
             if view.choice != "_new":
@@ -189,107 +178,112 @@ class Onboarding(commands.Cog):
         club = pdata.get("club") or {}
         await bscog.config.user(member).club_tag_cache.set((club.get("tag") or "").replace("#", ""))
 
-        # STEP 2: eligible clubs (LIVE) — skip full (>=30)
+        # STEP 2: eligible clubs (LIVE) — skip full (>=30) and separate reasons
         clubs_cog = self.bot.get_cog("Clubs")
         tracked = await clubs_cog.config.guild(guild).clubs() if clubs_cog else {}
         if not tracked:
             return await dm.send(embed=discord.Embed(title="No clubs configured", description="Ask staff to add clubs with `[p]clubs add #TAG`.", color=ERROR))
 
-        live_options: List[Tuple[str, Dict[str, Any]]] = []
+        eligible_open: List[Tuple[str, Dict[str, Any]]] = []
+        full_but_eligible: List[Tuple[str, Dict[str, Any]]] = []
+        under_req: List[Tuple[str, Dict[str, Any]]] = []
+
         for ctag, cfg in tracked.items():
             try:
                 cinfo = await api.get_club_by_tag(ctag)
             except Exception:
                 continue
             members = len(cinfo.get("members") or [])
-            if members >= MAX_MEMBERS:
-                continue
             req = int(cinfo.get("requiredTrophies", cfg.get("required_trophies", 0)))
-            if trophies >= req:
-                live_options.append((ctag, {
-                    "name": cinfo.get("name") or cfg.get("name") or f"#{ctag}",
-                    "required_trophies": req,
-                    "badge_id": cinfo.get("badgeId") or cfg.get("badge_id") or 0,
-                    "role_id": cfg.get("role_id"),
-                    "log_channel_id": cfg.get("log_channel_id"),
-                    "leadership_role_id": cfg.get("leadership_role_id"),
-                    "_members": members,
-                    "_type": (cinfo.get("type") or "unknown").title(),
-                    "_club_trophies": cinfo.get("trophies", 0),
-                    "_desc": (cinfo.get("description") or "")[:180],
-                }))
+            merged = {
+                "name": cinfo.get("name") or cfg.get("name") or f"#{ctag}",
+                "required_trophies": req,
+                "badge_id": cinfo.get("badgeId") or cfg.get("badge_id") or 0,
+                "role_id": cfg.get("role_id"),
+                "log_channel_id": cfg.get("log_channel_id"),
+                "leadership_role_id": cfg.get("leadership_role_id"),
+                "_members": members,
+                "_type": (cinfo.get("type") or "unknown").title(),
+                "_club_trophies": cinfo.get("trophies", 0),
+                "_desc": (cinfo.get("description") or "")[:180],
+            }
 
-        if not live_options:
-            # DM the applicant
-            await dm.send(embed=discord.Embed(
-                title="All clubs are full",
-                description="Right now every club is at capacity. Leadership has been pinged — they’ll make space and follow up.",
-                color=WARN
-            ))
-            # Ping BS Club Leadership in the notify channel
-            gconf = await self.config.guild(guild).all()
-            notify = guild.get_channel(gconf.get("apply_notify_channel_id") or 0)
-            if notify:
-                role = discord.utils.get(guild.roles, name="BS Club Leadership")
-                mention = role.mention if role else ""
-                e = discord.Embed(
-                    title="Applicant waiting — all clubs full",
-                    description=f"**{ign}** ({pdata.get('tag','')}) tried to apply but all clubs are full (≥{MAX_MEMBERS}).",
+            if trophies < req:
+                under_req.append((ctag, merged))
+            elif members >= MAX_MEMBERS:
+                full_but_eligible.append((ctag, merged))
+            else:
+                eligible_open.append((ctag, merged))
+
+        if not eligible_open:
+            if full_but_eligible and not under_req:
+                await dm.send(embed=discord.Embed(
+                    title="All eligible clubs are full",
+                    description="Right now every club you qualify for is at capacity. Leadership has been pinged — they’ll make space and follow up.",
+                    color=WARN
+                ))
+                gconf = await self.config.guild(guild).all()
+                notify = guild.get_channel(gconf.get("apply_notify_channel_id") or 0)
+                if notify:
+                    role = discord.utils.get(guild.roles, name="BS Club Leadership")
+                    mention = role.mention if role else ""
+                    e = discord.Embed(
+                        title="Applicant waiting — all eligible clubs full",
+                        description=f"**{ign}** ({pdata.get('tag','')}) qualifies but all eligible clubs are full (≥{MAX_MEMBERS}).",
+                        color=ERROR
+                    )
+                    await notify.send(content=mention or None, embed=e)
+                return
+            else:
+                return await dm.send(embed=discord.Embed(
+                    title="No eligible clubs yet",
+                    description="You don’t meet the trophy requirements for any of our clubs right now.\nKeep pushing trophies and try again soon!",
                     color=ERROR
-                )
-                await notify.send(content=mention or None, embed=e)
-            return
+                ))
 
-        # Sort: lowest members first, then higher req
-        live_options.sort(key=lambda x: (x[1]["_members"], -x[1].get("required_trophies", 0)))
-
-        # Pretty “cards” embed
+        # Sort and pretty cards
+        eligible_open.sort(key=lambda x: (x[1]["_members"], -x[1].get("required_trophies", 0)))
         cards = []
-        for ctag, c in live_options[:5]:
-            line = (
+        for ctag, c in eligible_open[:5]:
+            cards.append(
                 f"**{c['name']}**  `#{ctag}`\n"
                 f"**Members:** {c['_members']}/{MAX_MEMBERS} • **Req:** {c.get('required_trophies',0):,} • "
                 f"**Club Trophies:** {c['_club_trophies']:,} • **Type:** {c['_type']}\n"
                 f"{c['_desc'] or '—'}"
             )
-            cards.append(line)
 
         emb = discord.Embed(
             title=f"Hi {ign}! Pick an eligible club",
             description="\n\n".join(cards),
             color=GOLD
         )
-        # add a badge if there’s a single option (otherwise omit to avoid visual clutter)
-        if len(live_options) == 1 and live_options[0][1]["badge_id"]:
-            emb.set_thumbnail(url=club_badge_url(live_options[0][1]["badge_id"]))
+        if len(eligible_open) == 1 and eligible_open[0][1]["badge_id"]:
+            emb.set_thumbnail(url=club_badge_url(eligible_open[0][1]["badge_id"]))
 
-        view = ClubPickView(member.id, live_options)
+        view = ClubPickView(member.id, eligible_open)
         msg2 = await dm.send(embed=emb, view=view)
         await view.wait()
-        try: await msg2.edit(view=None)
-        except: pass
+        try:
+            await msg2.edit(view=None)
+        except Exception:
+            pass
         if view.selected is None:
             return await dm.send(embed=discord.Embed(title="Cancelled", color=WARN))
-
         ctag, ccfg = view.selected
+
         await self.config.member_from_ids(guild.id, member.id).pending_club_tag.set(ctag)
 
-        # STEP 3: notify leadership (ping leadership role if set, else BS Club Leadership by name)
+        # Notify leadership (specific role if configured, else named role)
         gconf = await self.config.guild(guild).all()
-        notify_id = gconf.get("apply_notify_channel_id")
-        target = guild.get_channel(notify_id or 0)
+        target = guild.get_channel(gconf.get("apply_notify_channel_id") or 0)
         leadership_ping = None
-        if tracked:
-            cfg = tracked.get(ctag) or {}
-            if not target and cfg.get("log_channel_id"):
-                target = guild.get_channel(cfg.get("log_channel_id"))
-            rid = cfg.get("leadership_role_id")
-            if rid:
-                role = guild.get_role(rid)
-                if role:
-                    leadership_ping = role.mention
+        cfg = tracked.get(ctag) or {}
+        rid = cfg.get("leadership_role_id")
+        if rid:
+            role = guild.get_role(rid)
+            if role:
+                leadership_ping = role.mention
         if not leadership_ping:
-            # fallback to named role
             role = discord.utils.get(guild.roles, name="BS Club Leadership")
             if role:
                 leadership_ping = role.mention
@@ -305,12 +299,10 @@ class Onboarding(commands.Cog):
 
         done = discord.Embed(
             title="Next Step",
-            description=f"Great! Request to join **{ccfg['name']}** in-game now. "
-                        f"Once you’re in, I’ll update your roles and nickname.",
+            description=f"Great! Request to join **{ccfg['name']}** in-game now. Once you’re in, I’ll update your roles and nickname.",
             color=SUCCESS
         )
         await dm.send(embed=done)
-
 
 async def setup(bot: Red):
     await bot.add_cog(Onboarding(bot))
