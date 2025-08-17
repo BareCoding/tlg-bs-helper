@@ -1,37 +1,60 @@
 # clubsync/clubsync.py
 # ---- TLGBS bootstrap: make sibling "brawlcommon" importable on cold start ----
 import sys, pathlib
-_COGS_DIR = pathlib.Path(__file__).resolve().parents[1]  # .../cogs
+_COGS_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(_COGS_DIR) not in sys.path:
     sys.path.insert(0, str(_COGS_DIR))
 # ------------------------------------------------------------------------------
 
+from typing import Dict, Any, Optional, List
+import asyncio
+import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import humanize_list
 from discord.ext import tasks
-import discord
-from typing import Dict, List, Set, Optional
+
+from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 
+ACCENT  = discord.Color.from_rgb(66, 135, 245)
+SUCCESS = discord.Color.green()
+WARN    = discord.Color.orange()
+ERROR   = discord.Color.red()
+
+MAX_MEMBERS = 30
+
 class ClubSync(commands.Cog):
-    """Poll clubs, diff members, dispatch join/leave events, and sync roles/nicknames."""
+    """
+    Background sync:
+      - Watches tracked clubs for member joins/leaves (poll)
+      - When a saved user joins their chosen club:
+          * assigns club role
+          * updates nickname to "IGN | CLUB" (CLUB without 'TLG')
+      - Posts simple join/leave notices to the club's log channel if configured
+    """
+
+    __version__ = "0.4.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xC10C10, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xC10B5Y, force_registration=True)
         default_guild = {
-            "clubs": {},          # club_tag -> {name, role_id, badge_id, log_channel_id, required_trophies}
-            "rosters": {},        # club_tag -> [#TAG, ...] last snapshot
-            "interval_sec": 60,
-            "roster_counts": {}   # for onboarding suggestions
+            "enabled": True,
+            "interval": 120,            # seconds
+            "nick_format": "{IGN} | {CLUB}",  # CLUB = club name without 'TLG'
+            "last_seen": {},            # tag -> list of member tags (for diffing)
         }
         self.config.register_guild(**default_guild)
         self._apis: Dict[int, BrawlStarsAPI] = {}
-        self.sync_loop.start()
+        self._locks: Dict[int, asyncio.Lock] = {}
+        self.loop.start()
 
     def cog_unload(self):
-        self.sync_loop.cancel()
+        self.loop.cancel()
+        for api in self._apis.values():
+            self.bot.loop.create_task(api.close())
 
     async def _api(self, guild: discord.Guild) -> BrawlStarsAPI:
         token = await get_brawl_api_token(self.bot)
@@ -41,122 +64,166 @@ class ClubSync(commands.Cog):
             self._apis[guild.id] = cli
         return cli
 
-    @tasks.loop(seconds=60)
-    async def sync_loop(self):
-        for guild in self.bot.guilds:
-            try:
-                interval = await self.config.guild(guild).interval_sec()
-                if self.sync_loop.seconds != interval:
-                    self.sync_loop.change_interval(seconds=interval)
-                await self._sync_guild(guild)
-            except Exception:
-                continue
+    def _guild_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._locks:
+            self._locks[guild_id] = asyncio.Lock()
+        return self._locks[guild_id]
 
-    @sync_loop.before_loop
-    async def before_sync(self):
-        await self.bot.wait_until_red_ready()
+    # ---------------- Commands ----------------
 
     @commands.group()
+    @commands.guild_only()
     async def clubsync(self, ctx):
-        """Club sync controls."""
+        """Configure and manage the club sync worker."""
         pass
 
+    @clubsync.command(name="enable")
+    @bs_admin_check()
+    async def cs_enable(self, ctx):
+        await self.config.guild(ctx.guild).enabled.set(True)
+        await ctx.send(embed=discord.Embed(title="ClubSync enabled", color=SUCCESS))
+
+    @clubsync.command(name="disable")
+    @bs_admin_check()
+    async def cs_disable(self, ctx):
+        await self.config.guild(ctx.guild).enabled.set(False)
+        await ctx.send(embed=discord.Embed(title="ClubSync disabled", color=WARN))
+
     @clubsync.command(name="interval")
-    @commands.admin()
-    async def clubsync_interval(self, ctx, seconds: int):
-        """Set polling interval (min 15s)."""
-        seconds = max(15, seconds)
-        await self.config.guild(ctx.guild).interval_sec.set(seconds)
-        e = discord.Embed(title="Interval Updated", description=f"Polling every **{seconds}s**.", color=discord.Color.green())
-        await ctx.send(embed=e)
+    @bs_admin_check()
+    async def cs_interval(self, ctx, seconds: int):
+        seconds = max(60, min(900, seconds))
+        await self.config.guild(ctx.guild).interval.set(seconds)
+        await ctx.send(embed=discord.Embed(title="Poll interval updated", description=f"{seconds}s", color=SUCCESS))
+        if self.loop.is_running():
+            self.loop.change_interval(seconds=seconds)
 
-    async def _sync_guild(self, guild: discord.Guild):
-        api = await self._api(guild)
-        gconf = await self.config.guild(guild).all()
-        clubs: Dict[str, Dict] = gconf.get("clubs", {})
-        rosters: Dict[str, List[str]] = gconf.get("rosters", {})
-        new_rosters = {}
-        roster_counts = {}
+    @clubsync.command(name="nickformat")
+    @bs_admin_check()
+    async def cs_nickformat(self, ctx, *, fmt: str):
+        """
+        Set nickname format. Replacements:
+         {IGN}  - player name
+         {CLUB} - club name with 'TLG' removed
+        """
+        await self.config.guild(ctx.guild).nick_format.set(fmt)
+        await ctx.send(embed=discord.Embed(title="Nickname format updated", description=f"`{fmt}`", color=SUCCESS))
 
-        for ctag, cfg in clubs.items():
-            cfg["tag"] = ctag
+    # ---------------- Worker ----------------
+
+    @tasks.loop(seconds=120)
+    async def loop(self):
+        for guild in list(self.bot.guilds):
             try:
-                members = await api.get_club_members(ctag)
+                await self._tick(guild)
             except Exception:
                 continue
 
-            tags_now: Set[str] = set()
-            name_lookup = {}
-            for m in members.get("items", []):
-                ptag = f"#{api.norm_tag(m.get('tag',''))}"
-                tags_now.add(ptag)
-                name_lookup[ptag] = m.get("name")
-            roster_counts[ctag] = len(tags_now)
+    @loop.before_loop
+    async def before(self):
+        await self.bot.wait_until_ready()
+        # pick up configured interval
+        for g in self.bot.guilds:
+            seconds = (await self.config.guild(g).interval())
+            if seconds and seconds != 120:
+                self.loop.change_interval(seconds=seconds)
+                break
 
-            prev = set(rosters.get(ctag, []))
-            joined = sorted(tags_now - prev)
-            left   = sorted(prev - tags_now)
-
-            # Dispatch events; clublogs will post embeds
-            for t in joined:
-                self.bot.dispatch("brawl_club_update", guild, {
-                    "club_tag": ctag,
-                    "club_name": cfg.get("name","Club"),
-                    "badge_id": cfg.get("badge_id") or 0,
-                    "event": "join",
-                    "player_tag": t,
-                    "player_name": name_lookup.get(t)
-                })
-            for t in left:
-                self.bot.dispatch("brawl_club_update", guild, {
-                    "club_tag": ctag,
-                    "club_name": cfg.get("name","Club"),
-                    "badge_id": cfg.get("badge_id") or 0,
-                    "event": "leave",
-                    "player_tag": t,
-                    "player_name": name_lookup.get(t)
-                })
-
-            new_rosters[ctag] = list(tags_now)
-
-        await self.config.guild(guild).rosters.set(new_rosters)
-        await self.config.guild(guild).roster_counts.set(roster_counts)
-
-        # Role/nickname sync
-        pcog = self.bot.get_cog("BSInfo")
-        if not pcog:
+    async def _tick(self, guild: discord.Guild):
+        if not guild:
             return
-        for member in guild.members:
-            u = await pcog.config.user(member).all()
-            if not u["tags"]:
-                continue
-            try:
-                pdata = await api.get_player(u["tags"][u["default_index"]])
-            except Exception:
-                continue
-            club = pdata.get("club") or {}
-            ctag = api.norm_tag(club.get("tag","")) if club.get("tag") else None
-            ign  = pdata.get("name") or member.display_name
-            if ctag and ctag in clubs:
-                club_display = (clubs[ctag]['name'] or "").replace("TLG", "").strip()
-                desired = f"{ign} | {club_display}"
-                if guild.me.guild_permissions.manage_nicknames and member.display_name != desired:
-                    try: await member.edit(nick=desired, reason="Club sync")
-                    except: pass
-                role_id = clubs[ctag].get("role_id")
-                if role_id:
-                    role = guild.get_role(role_id)
-                    if role and role not in member.roles:
-                        try: await member.add_roles(role, reason="Club sync")
-                        except: pass
-            else:
-                for c in clubs.values():
-                    rid = c.get("role_id")
-                    if rid:
-                        r = guild.get_role(rid)
-                        if r and r in member.roles:
-                            try: await member.remove_roles(r, reason="Left club")
-                            except: pass
+        if not (await self.config.guild(guild).enabled()):
+            return
+
+        lock = self._guild_lock(guild.id)
+        if lock.locked():
+            return
+        async with lock:
+            api = await self._api(guild)
+            clubs_cog = self.bot.get_cog("Clubs")
+            if not clubs_cog:
+                return
+            tracked = await clubs_cog.config.guild(guild).clubs()
+            if not tracked:
+                return
+
+            last_seen = await self.config.guild(guild).last_seen()  # {clubtag: [membertags]}
+            updated_seen: Dict[str, List[str]] = {}
+
+            for ctag, cfg in tracked.items():
+                try:
+                    cmembers = await api.get_club_members(ctag)
+                except Exception:
+                    continue
+                items = cmembers.get("items") or []
+                tags_now = [m.get("tag", "").replace("#", "") for m in items if m.get("tag")]
+                updated_seen[ctag] = tags_now
+
+                # Compare
+                before = set(last_seen.get(ctag, []))
+                after = set(tags_now)
+                joined = list(after - before)
+                left   = list(before - after)
+
+                # Notify channel
+                chan = guild.get_channel(cfg.get("log_channel_id") or 0)
+
+                # Role assignment and nickname updates for joiners
+                if joined:
+                    # Try to find users in the guild with this tag saved as default or any saved tag
+                    bsinfo = self.bot.get_cog("BSInfo")
+                    role = guild.get_role(cfg.get("role_id") or 0)
+                    for jtag in joined:
+                        member: Optional[discord.Member] = None
+                        ign = None
+                        # naive scan of members who have saved tags (bounded by guild size)
+                        for m in guild.members:
+                            if not bsinfo:
+                                break
+                            u = await bsinfo.config.user(m).all()
+                            tags = u.get("tags", [])
+                            if jtag in [t.replace("#", "").upper() for t in tags]:
+                                member = m
+                                ign = u.get("ign_cache") or m.display_name
+                                break
+                        # set roles and nickname
+                        if member and role:
+                            try:
+                                await member.add_roles(role, reason="Joined club in-game")
+                            except Exception:
+                                pass
+                        if member:
+                            # Nickname: IGN | CLUB (without 'TLG')
+                            club_name = cfg.get("name", "Club").replace("TLG", "").strip()
+                            fmt = (await self.config.guild(guild).nick_format())
+                            newnick = (fmt or "{IGN} | {CLUB}").format(IGN=ign or member.display_name, CLUB=club_name)
+                            try:
+                                await member.edit(nick=newnick, reason="Joined club in-game")
+                            except Exception:
+                                pass
+                        if chan:
+                            try:
+                                await chan.send(embed=discord.Embed(
+                                    title="Club Join",
+                                    description=f"`#{jtag}` joined **{cfg.get('name','?')}**",
+                                    color=SUCCESS
+                                ))
+                            except Exception:
+                                pass
+
+                if left and chan:
+                    for ltag in left:
+                        try:
+                            await chan.send(embed=discord.Embed(
+                                title="Club Leave",
+                                description=f"`#{ltag}` left **{cfg.get('name','?')}**",
+                                color=ERROR
+                            ))
+                        except Exception:
+                            pass
+
+            # Save the snapshot for next diff
+            await self.config.guild(guild).last_seen.set(updated_seen)
 
 async def setup(bot: Red):
     await bot.add_cog(ClubSync(bot))
