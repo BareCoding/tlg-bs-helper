@@ -1,4 +1,11 @@
 # onboarding/onboarding.py
+# ---- TLGBS bootstrap: make sibling "brawlcommon" importable on cold start ----
+import sys, pathlib
+_COGS_DIR = pathlib.Path(__file__).resolve().parents[1]  # .../cogs
+if str(_COGS_DIR) not in sys.path:
+    sys.path.insert(0, str(_COGS_DIR))
+# ------------------------------------------------------------------------------
+
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 import discord

@@ -2,7 +2,7 @@
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 import discord
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from discord.ui import View, button, Button
 
 from brawlcommon.brawl_api import BrawlStarsAPI
@@ -56,11 +56,14 @@ class BSInfo(commands.Cog):
     """
     Deep Brawl Stars lookups (players, clubs, brawlers, rankings, events)
     + per-user tag storage (max 3) used as defaults for lookups.
+    Also exposes `!bs start` which DMs the application flow via Onboarding.
     """
+
+    __version__ = "0.7.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # Tag store replaces the old Players cog config
+        # Unique, valid hex identifier
         self.config = Config.get_conf(self, identifier=0xB51F0C, force_registration=True)
         default_user = {"tags": [], "default_index": 0, "ign_cache": "", "club_tag_cache": ""}
         self.config.register_user(**default_user)
@@ -98,10 +101,10 @@ class BSInfo(commands.Cog):
 
     @commands.group()
     async def bs(self, ctx):
-        """Brawl Stars API commands."""
+        """Brawl Stars commands."""
         pass
 
-    # ---------- Tag management under `bs tags` ----------
+    # ---------- Tag management: !bs tags ----------
     @bs.group(name="tags")
     async def bs_tags(self, ctx):
         """Manage your saved tags (max 3)."""
@@ -110,6 +113,8 @@ class BSInfo(commands.Cog):
     @bs_tags.command(name="save")
     async def bs_tags_save(self, ctx, tag: str):
         """Save a tag after validating via the API."""
+        if ctx.guild is None:
+            return await ctx.send("This command can only be used in servers.")
         api = await self._api(ctx.guild)
         pdata = await api.get_player(tag)  # validate
         norm = api.norm_tag(tag)
@@ -179,21 +184,23 @@ class BSInfo(commands.Cog):
                 u["default_index"] = 0
         await ctx.send(embed=discord.Embed(title="Tag removed", description=f"Removed **{tag_pretty(removed)}**.", color=WARN))
 
+    # ---------- Verify (guild-only) ----------
     @bs.command(name="verify")
+    @commands.guild_only()
     async def bs_verify(self, ctx, tag: str):
-        """Validate and save a tag (same as `bs tags save`)."""
-        await ctx.invoke(self.bs_tags_save, tag=tag)
+        """Validate and save a tag (guild-only)."""
+        await self.bs_tags_save(ctx, tag=tag)
 
-    # ---------- Player info (uses default tag if omitted) ----------
+    # ---------- Player (uses default tag if omitted) ----------
     @bs.command(name="player")
     async def bs_player(self, ctx, tag: Optional[str] = None):
         """Show a player's profile. If no tag is given, uses your default tag."""
-        api = await self._api(ctx.guild)
-        use_tag = tag
+        if ctx.guild is None and not tag:
+            return await ctx.send("In DMs, please provide a tag: `bs player #TAG`.")
+        api = await self._api(ctx.guild or self.bot.guilds[0])  # fallback guild for token/session
+        use_tag = tag or await self._get_default_tag(ctx.author)
         if not use_tag:
-            use_tag = await self._get_default_tag(ctx.author)
-            if not use_tag:
-                return await ctx.send(embed=discord.Embed(title="No default tag", description="Use `[p]bs tags save <tag>` first, or provide a tag.", color=ERROR))
+            return await ctx.send(embed=discord.Embed(title="No default tag", description="Use `[p]bs tags save <tag>` first, or provide a tag.", color=ERROR))
         p = await api.get_player(use_tag)
 
         name = p.get("name","Unknown")
@@ -213,7 +220,6 @@ class BSInfo(commands.Cog):
         e1.add_field(name="EXP Level", value=str(exp))
         e1.add_field(name="Brawlers Owned", value=str(len(brawlers)))
         e1.set_thumbnail(url=player_avatar_url(icon_id))
-        e1.set_footer(text=ctx.guild.name)
 
         lines = []
         for b in sorted(brawlers, key=lambda x: (-x.get("trophies",0), x.get("name",""))):
@@ -228,7 +234,7 @@ class BSInfo(commands.Cog):
     @bs.command(name="club")
     async def bs_club(self, ctx, club_tag: str):
         """Show club overview."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         c = await api.get_club_by_tag(club_tag)
 
         name   = c.get("name","Club")
@@ -253,7 +259,7 @@ class BSInfo(commands.Cog):
     @bs.command(name="clubmembers")
     async def bs_clubmembers(self, ctx, club_tag: str):
         """List all members of a club (paginated)."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         m = await api.get_club_members(club_tag)
         items = m.get("items") or []
 
@@ -275,7 +281,7 @@ class BSInfo(commands.Cog):
     @bs.command(name="brawlers")
     async def bs_brawlers(self, ctx):
         """List all brawlers (paginated)."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         data = await api.get_brawlers()
         items = data.get("items") or []
         items.sort(key=lambda b: (b.get("rarity",{}).get("rank", 99), b.get("name","")))
@@ -284,7 +290,7 @@ class BSInfo(commands.Cog):
         chunk = 12
         for i in range(0, len(items), chunk):
             part = items[i:i+chunk]
-            lines = [f"**{b.get('name')}** — {b.get('rarity',{}).get('name','?')}" for b in part]
+            lines = [f"**{b.get('name')}** — {b.get("rarity",{}).get("name","?")}" for b in part]
             thumb_id = part[0].get("id",0) if part else 0
             e = discord.Embed(title=f"Brawlers ({i+1}-{min(i+chunk,len(items))}/{len(items)})", description="\n".join(lines) or "—", color=ACCENT)
             if thumb_id:
@@ -303,7 +309,7 @@ class BSInfo(commands.Cog):
     @bs_rankings.command(name="players")
     async def bs_rankings_players(self, ctx, country: str = "global", limit: int = 25):
         """Top players (global or country code like 'AU', 'US')."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         data = await api.get_rankings_players(country.lower(), limit)
         items = data.get("items") or []
 
@@ -316,7 +322,7 @@ class BSInfo(commands.Cog):
     @bs_rankings.command(name="clubs")
     async def bs_rankings_clubs(self, ctx, country: str = "global", limit: int = 25):
         """Top clubs (global or country code)."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         data = await api.get_rankings_clubs(country.lower(), limit)
         items = data.get("items") or []
 
@@ -329,7 +335,7 @@ class BSInfo(commands.Cog):
     @bs_rankings.command(name="brawler")
     async def bs_rankings_brawler(self, ctx, id_or_name: str, country: str = "global", limit: int = 25):
         """Top players for a specific brawler."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         all_b = await api.get_brawlers()
         bid: Optional[int] = None
         if id_or_name.isdigit():
@@ -354,7 +360,7 @@ class BSInfo(commands.Cog):
     @bs.command(name="events")
     async def bs_events(self, ctx):
         """Current event rotation (maps & modes)."""
-        api = await self._api(ctx.guild)
+        api = await self._api(ctx.guild or self.bot.guilds[0])
         rot = await api.get_events_rotation()
         active = rot.get("active") or rot.get("events") or rot.get("items") or rot
         if isinstance(active, dict):
@@ -376,19 +382,26 @@ class BSInfo(commands.Cog):
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=pages[0], view=view)
 
-    # ---------- Start application from server: !bs start ----------
+    # ---------- Start application (server-only -> DMs) ----------
     @bs.command(name="start")
     @commands.guild_only()
     async def bs_start(self, ctx):
         """
-        Start the Brawl Stars application process here (in the server).
-        This calls the Onboarding cog's public method.
+        Start the application in DMs.
         """
-        ob: Optional[commands.Cog] = self.bot.get_cog("Onboarding")
-        if not ob or not hasattr(ob, "start_application"):
+        ob = self.bot.get_cog("Onboarding")
+        if not ob or not hasattr(ob, "start_application_dm"):
             return await ctx.send(embed=discord.Embed(title="Onboarding not loaded", description="Ask an admin to load the Onboarding cog.", color=ERROR))
-        # Delegate to onboarding.cog (runs UI in-channel)
-        await getattr(ob, "start_application")(ctx)  # type: ignore[attr-defined]
+
+        try:
+            dm = await ctx.author.create_dm()
+            await dm.send(embed=discord.Embed(title="Club Application", description="Let's get you set up! Follow the prompts here.", color=ACCENT))
+        except discord.Forbidden:
+            return await ctx.send(embed=discord.Embed(title="I can't DM you", description="Enable DMs from server members and try again.", color=ERROR))
+
+        await ctx.send(embed=discord.Embed(title="Check your DMs", description="I’ve sent you a message to continue your application.", color=SUCCESS))
+        # hand off to onboarding in DM context
+        await ob.start_application_dm(ctx.guild, ctx.author)  # type: ignore[attr-defined]
 
 async def setup(bot: Red):
     await bot.add_cog(BSInfo(bot))
