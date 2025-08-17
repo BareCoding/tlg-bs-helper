@@ -22,23 +22,23 @@ def club_badge_url(badge_id: int) -> str:
     return BRAWLIFY_CLUB_BADGE.format(badge_id=badge_id or 0)
 
 def brawler_icon_url(brawler_id: int) -> str:
-    return BRAWLIFY_BRAWLER.format(brawler_id=brawler_id or 0)
+    return BRAWLIFY_BRAWLER.format(brawler_id=int(brawler_id) if brawler_id else 0)
 
 def starpower_icon_url(sp_id: int) -> str:
-    return BRAWLIFY_STARPOWER.format(starpower_id=sp_id or 0)
+    return BRAWLIFY_STARPOWER.format(starpower_id=int(sp_id) if sp_id else 0)
 
 def gadget_icon_url(g_id: int) -> str:
-    return BRAWLIFY_GADGET.format(gadget_id=g_id or 0)
+    return BRAWLIFY_GADGET.format(gadget_id=int(g_id) if g_id else 0)
 
 def gear_icon_url(gear_id: int) -> str:
-    return BRAWLIFY_GEAR.format(gear_id=gear_id or 0)
+    return BRAWLIFY_GEAR.format(gear_id=int(gear_id) if gear_id else 0)
 
 def mode_icon_url(mode: str) -> str:
     safe = re.sub(r"[^a-z0-9_-]", "", (mode or "").lower())
     return BRAWLIFY_MODE.format(mode=safe or "gem-grab")
 
 def map_image_url(map_id: int) -> str:
-    return BRAWLIFY_MAP.format(map_id=map_id or 0)
+    return BRAWLIFY_MAP.format(map_id=int(map_id) if map_id else 0)
 
 def eligible_clubs(
     clubs_cfg: Dict[str, Dict[str, Any]],
@@ -49,6 +49,7 @@ def eligible_clubs(
     API-driven eligibility:
       - player_trophies >= club.required_trophies (from official API)
       - member_count < 50
+    Sorted: lowest members first, then higher requirements.
     """
     out = []
     for ctag, cfg in (clubs_cfg or {}).items():
@@ -60,6 +61,7 @@ def eligible_clubs(
     return out
 
 def find_brawler_id_by_name(all_brawlers: Dict[str, Any], query: str) -> Optional[int]:
+    """Quick fuzzy-ish match for a brawler name to its id."""
     q = (query or "").strip().lower()
     for item in (all_brawlers.get("items") or []):
         name = (item.get("name") or "").lower()
