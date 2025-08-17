@@ -2,7 +2,7 @@
 from typing import Dict, Any, List, Tuple
 
 BRAWLIFY_PLAYER_AVATAR = "https://cdn.brawlify.com/profile/{icon_id}.png"
-BRAWLIFY_CLUB_BADGE = "https://cdn.brawlify.com/club/{badge_id}.png"
+BRAWLIFY_CLUB_BADGE    = "https://cdn.brawlify.com/club/{badge_id}.png"
 
 def tag_pretty(tag: str) -> str:
     return f"#{tag.upper().replace('#','')}"

@@ -11,7 +11,7 @@ async def get_brawl_api_token(bot: Red) -> str:
     token = tokens.get("api_key")
     if not token:
         raise RuntimeError(
-            "No Brawl Stars API token configured. "
+            "No Brawl Stars API token configured.\n"
             "Use: `[p]set api brawlstars api_key,YOUR_SUPERCELL_TOKEN`"
         )
     return token

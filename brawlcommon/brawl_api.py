@@ -29,7 +29,9 @@ class BrawlStarsAPI:
         async with self._lock:
             async with self._session.get(url, headers=self._headers()) as resp:
                 if resp.status == 429:
-                    await asyncio.sleep(int(resp.headers.get("Retry-After", "1")))
+                    # simple backoff
+                    retry = int(resp.headers.get("Retry-After", "1"))
+                    await asyncio.sleep(retry)
                     return await self._get(path)
                 resp.raise_for_status()
                 return await resp.json()
