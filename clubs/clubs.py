@@ -1,34 +1,53 @@
 # clubs/clubs.py
 # ---- TLGBS bootstrap: make sibling "brawlcommon" importable on cold start ----
 import sys, pathlib
-_COGS_DIR = pathlib.Path(__file__).resolve().parents[1]  # .../cogs
+_COGS_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(_COGS_DIR) not in sys.path:
     sys.path.insert(0, str(_COGS_DIR))
 # ------------------------------------------------------------------------------
 
-from redbot.core import commands, Config, checks
-from redbot.core.bot import Red
+from typing import Dict, Any, Optional, List
 import discord
+from redbot.core import commands, Config
+from redbot.core.bot import Red
+
+from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import club_badge_url
 
-ACCENT  = discord.Color.from_rgb(66,135,245)
+ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()
+WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 
 class Clubs(commands.Cog):
-    """Manage tracked clubs (API-driven requirements)."""
+    """
+    Track TLGBS clubs (add/remove/list and per-club settings).
+    Stores:
+      guild.clubs = {
+        "<TAG_NOHASH>": {
+           "name": str,
+           "badge_id": int,
+           "role_id": Optional[int],            # Discord role to assign for this club
+           "log_channel_id": Optional[int],     # channel for applications/logs
+           "leadership_role_id": Optional[int], # role to ping on apps
+           "required_trophies": int,            # cached from API (not authoritative)
+        }, ...
+      }
+    """
+
+    __version__ = "0.3.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xC10B5, force_registration=True)
-        default_guild = {
-            # club_tag -> {name, required_trophies, role_id, badge_id, log_channel_id, leadership_role_id}
-            "clubs": {}
-        }
-        self.config.register_guild(**default_guild)
-        self._apis = {}
+        self.config = Config.get_conf(self, identifier=0xC1A8B5, force_registration=True)
+        self.config.register_guild(clubs={})
+        self._apis: Dict[int, BrawlStarsAPI] = {}
+
+    def cog_unload(self):
+        for api in self._apis.values():
+            self.bot.loop.create_task(api.close())
 
     async def _api(self, guild: discord.Guild) -> BrawlStarsAPI:
         token = await get_brawl_api_token(self.bot)
@@ -38,114 +57,144 @@ class Clubs(commands.Cog):
             self._apis[guild.id] = cli
         return cli
 
+    # ---------------- Commands ----------------
+
     @commands.group()
-    @checks.admin()
+    @commands.guild_only()
     async def clubs(self, ctx):
-        """Clubs directory admin."""
+        """Manage and view tracked clubs."""
         pass
 
-    @clubs.command()
-    async def add(self, ctx, club_tag: str):
-        """Track a club (pulls name, badge, required trophies from API)."""
+    # ------- Admin: add/remove/config -------
+
+    @clubs.command(name="add")
+    @bs_admin_check()
+    async def clubs_add(self, ctx, club_tag: str):
+        """Add a club by tag (pulls data from the API)."""
         api = await self._api(ctx.guild)
-        c = await api.get_club_by_tag(club_tag)
-        ctag = api.norm_tag(club_tag)
-        cfg = {
-            "name": c.get("name","Club"),
-            "required_trophies": c.get("requiredTrophies", 0),
-            "role_id": None,
-            "badge_id": (c.get("badgeId") or 0),
-            "log_channel_id": None,
-            "leadership_role_id": None,
-        }
+        tag = api.norm_tag(club_tag)
+        data = await api.get_club_by_tag(tag)
+        name = data.get("name", f"#{tag}")
+        badge = data.get("badgeId") or 0
+        req = int(data.get("requiredTrophies", 0))
+
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            clubs[ctag] = {**clubs.get(ctag, {}), **cfg}
-        e = discord.Embed(title="Club Tracked", description=f"**{cfg['name']}** #{ctag}", color=SUCCESS)
-        if cfg["badge_id"]:
-            e.set_thumbnail(url=club_badge_url(cfg["badge_id"]))
-        e.add_field(name="Req. Trophies", value=f"{cfg['required_trophies']:,}")
+            if tag in clubs:
+                return await ctx.send(embed=discord.Embed(
+                    title="Already tracked", description=f"Club **{name}** `#{tag}` is already tracked.", color=WARN
+                ))
+            clubs[tag] = {
+                "name": name,
+                "badge_id": badge,
+                "role_id": None,
+                "log_channel_id": None,
+                "leadership_role_id": None,
+                "required_trophies": req,
+            }
+
+        e = discord.Embed(title="Club added", description=f"**{name}** `#{tag}`", color=SUCCESS)
+        if badge:
+            e.set_thumbnail(url=club_badge_url(badge))
+        e.add_field(name="Required Trophies", value=str(req))
         await ctx.send(embed=e)
 
-    @clubs.command()
-    async def refresh(self, ctx, club_tag: str):
-        """Refresh a tracked club's info from the API."""
+    @clubs.command(name="remove")
+    @bs_admin_check()
+    async def clubs_remove(self, ctx, club_tag: str):
+        """Remove a club from tracking."""
         api = await self._api(ctx.guild)
-        ctag = api.norm_tag(club_tag)
-        c = await api.get_club_by_tag(ctag)
+        tag = api.norm_tag(club_tag)
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            if ctag not in clubs:
-                return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
-            clubs[ctag]["name"] = c.get("name","Club")
-            clubs[ctag]["required_trophies"] = c.get("requiredTrophies", 0)
-            clubs[ctag]["badge_id"] = (c.get("badgeId") or 0)
-        e = discord.Embed(title="Club Refreshed", description=f"**{c.get('name','Club')}** #{ctag}", color=SUCCESS)
-        if c.get("badgeId"):
-            e.set_thumbnail(url=club_badge_url(c.get("badgeId")))
-        e.add_field(name="Req. Trophies", value=f"{c.get('requiredTrophies',0):,}")
-        await ctx.send(embed=e)
+            if tag not in clubs:
+                return await ctx.send(embed=discord.Embed(
+                    title="Not tracked", description=f"`#{tag}` isn’t tracked.", color=ERROR
+                ))
+            cfg = clubs.pop(tag)
+        await ctx.send(embed=discord.Embed(
+            title="Club removed", description=f"Removed **{cfg.get('name','?')}** `#{tag}`.", color=WARN
+        ))
 
-    @clubs.command()
-    async def remove(self, ctx, club_tag: str):
-        """Stop tracking a club."""
-        ctag = club_tag.replace("#","").upper()
+    @clubs.command(name="setrole")
+    @bs_admin_check()
+    async def clubs_setrole(self, ctx, club_tag: str, role: discord.Role):
+        """Set the Discord role to assign when a member joins this club."""
+        api = await self._api(ctx.guild)
+        tag = api.norm_tag(club_tag)
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            if ctag in clubs:
-                clubs.pop(ctag)
-                e = discord.Embed(title="Club Removed", description=f"Stopped tracking #{ctag}.", color=discord.Color.orange())
-            else:
-                e = discord.Embed(title="Not Tracked", description=f"#{ctag} was not tracked.", color=ERROR)
-        await ctx.send(embed=e)
+            if tag not in clubs:
+                return await ctx.send(embed=discord.Embed(title="Not tracked", description=f"`#{tag}` isn’t tracked.", color=ERROR))
+            clubs[tag]["role_id"] = role.id
+            name = clubs[tag].get("name", f"#{tag}")
+        await ctx.send(embed=discord.Embed(
+            title="Club role set", description=f"{role.mention} will be assigned for **{name}** `#{tag}`.", color=SUCCESS
+        ))
 
-    @clubs.command()
-    async def setrole(self, ctx, club_tag: str, role: discord.Role):
-        """Set the Discord member role for this club (granted on join)."""
-        ctag = club_tag.replace("#","").upper()
+    @clubs.command(name="setlog")
+    @bs_admin_check()
+    async def clubs_setlog(self, ctx, club_tag: str, channel: discord.TextChannel):
+        """Set the log/applications channel for this club."""
+        api = await self._api(ctx.guild)
+        tag = api.norm_tag(club_tag)
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            if ctag not in clubs:
-                return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
-            clubs[ctag]["role_id"] = role.id
-        e = discord.Embed(title="Role Set", description=f"Members of #{ctag} get {role.mention}.", color=SUCCESS)
-        await ctx.send(embed=e)
+            if tag not in clubs:
+                return await ctx.send(embed=discord.Embed(title="Not tracked", description=f"`#{tag}` isn’t tracked.", color=ERROR))
+            clubs[tag]["log_channel_id"] = channel.id
+            name = clubs[tag].get("name", f"#{tag}")
+        await ctx.send(embed=discord.Embed(
+            title="Club log channel set", description=f"Logs for **{name}** `#{tag}` → {channel.mention}", color=SUCCESS
+        ))
 
-    @clubs.command()
-    async def setlead(self, ctx, club_tag: str, role: discord.Role):
-        """Set a **leadership role** to ping on new club applications."""
-        ctag = club_tag.replace("#","").upper()
+    @clubs.command(name="setlead")
+    @bs_admin_check()
+    async def clubs_setlead(self, ctx, club_tag: str, role: discord.Role):
+        """Set the leadership role to ping for this club."""
+        api = await self._api(ctx.guild)
+        tag = api.norm_tag(club_tag)
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            if ctag not in clubs:
-                return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
-            clubs[ctag]["leadership_role_id"] = role.id
-        e = discord.Embed(title="Leadership Role Set", description=f"Applications for #{ctag} will ping {role.mention}.", color=SUCCESS)
-        await ctx.send(embed=e)
+            if tag not in clubs:
+                return await ctx.send(embed=discord.Embed(title="Not tracked", description=f"`#{tag}` isn’t tracked.", color=ERROR))
+            clubs[tag]["leadership_role_id"] = role.id
+            name = clubs[tag].get("name", f"#{tag}")
+        await ctx.send(embed=discord.Embed(
+            title="Leadership role set", description=f"{role.mention} will be pinged for **{name}** `#{tag}`.", color=SUCCESS
+        ))
 
-    @clubs.command()
-    async def setlog(self, ctx, club_tag: str, channel: discord.TextChannel):
-        """Set the per-club log channel."""
-        ctag = club_tag.replace("#", "").upper()
-        async with self.config.guild(ctx.guild).clubs() as clubs:
-            if ctag not in clubs:
-                return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
-            clubs[ctag]["log_channel_id"] = channel.id
-        e = discord.Embed(title="Log Channel Set", description=f"#{ctag} logs → {channel.mention}", color=SUCCESS)
-        await ctx.send(embed=e)
+    # ------- Viewers -------
 
-    @clubs.command()
-    async def list(self, ctx):
-        """List tracked clubs."""
+    @clubs.command(name="list")
+    async def clubs_list(self, ctx):
+        """List all tracked clubs."""
         clubs = await self.config.guild(ctx.guild).clubs()
         if not clubs:
-            e = discord.Embed(title="No Clubs", description="Use `[p]clubs add <#TAG>`.", color=discord.Color.orange())
-            return await ctx.send(embed=e)
+            return await ctx.send(embed=discord.Embed(title="No clubs tracked", color=WARN))
         lines = []
-        for k, v in clubs.items():
-            lines.append(
-                f"**{v['name']}**  #{k} | req {v['required_trophies']}"
-                f" | role: {'set' if v.get('role_id') else 'unset'}"
-                f" | lead: {'set' if v.get('leadership_role_id') else 'unset'}"
-                f" | log: {'set' if v.get('log_channel_id') else 'unset'}"
-            )
-        e = discord.Embed(title="Tracked Clubs", description="\n".join(lines), color=ACCENT)
-        await ctx.send(embed=e)
+        for tag, cfg in clubs.items():
+            name = cfg.get("name", f"#{tag}")
+            req = cfg.get("required_trophies", 0)
+            role_id = cfg.get("role_id")
+            role_txt = f"<@&{role_id}>" if role_id else "—"
+            lines.append(f"**{name}** `#{tag}` • Req **{req:,}** • Role {role_txt}")
+        await ctx.send(embed=discord.Embed(title="Tracked Clubs", description="\n".join(lines), color=ACCENT))
+
+    @clubs.command(name="refreshcache")
+    @bs_admin_check()
+    async def clubs_refreshcache(self, ctx):
+        """Refresh cached name/badge/req for all tracked clubs from API."""
+        api = await self._api(ctx.guild)
+        updated = 0
+        async with self.config.guild(ctx.guild).clubs() as clubs:
+            for tag, cfg in list(clubs.items()):
+                try:
+                    c = await api.get_club_by_tag(tag)
+                except Exception:
+                    continue
+                cfg["name"] = c.get("name", cfg.get("name", f"#{tag}"))
+                cfg["badge_id"] = c.get("badgeId") or cfg.get("badge_id", 0)
+                cfg["required_trophies"] = int(c.get("requiredTrophies", cfg.get("required_trophies", 0)))
+                updated += 1
+        await ctx.send(embed=discord.Embed(
+            title="Cache refreshed", description=f"Updated {updated} clubs from API.", color=SUCCESS
+        ))
 
 async def setup(bot: Red):
     await bot.add_cog(Clubs(bot))
