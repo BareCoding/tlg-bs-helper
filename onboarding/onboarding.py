@@ -18,7 +18,14 @@ class TagSelect(discord.ui.Select):
     def __init__(self, saved_tags: List[str]):
         options = [discord.SelectOption(label=f"Use {tag_pretty(t)}", value=t) for t in saved_tags]
         options.append(discord.SelectOption(label="Enter a new tag…", value="_new", emoji="✍️"))
-        super().__init__(placeholder="Choose a saved tag, or enter a new one…", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="Choose a saved tag, or enter a new one…",
+                         min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "TagSelectView" = self.view  # type: ignore
+        view.choice = self.values[0]
+        await interaction.response.defer()
+        view.stop()
 
 class TagSelectView(discord.ui.View):
     def __init__(self, author_id: int, saved_tags: List[str], timeout: int = 180):
@@ -30,15 +37,22 @@ class TagSelectView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
-    @discord.ui.select(cls=TagSelect)
-    async def choose(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.choice = select.values[0]
-        await interaction.response.defer()
-        self.stop()
+    async def on_timeout(self) -> None:
+        for c in self.children:
+            if hasattr(c, "disabled"):
+                c.disabled = True
 
 class ClubPickButton(discord.ui.Button):
     def __init__(self, index: int, label: str):
-        super().__init__(style=discord.ButtonStyle.primary, label=f"{index}. {label}", custom_id=f"club_{index}")
+        super().__init__(style=discord.ButtonStyle.primary, label=f"{index}. {label}")
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "ClubPickView" = self.view  # type: ignore
+        if 1 <= self.index <= len(view.options):
+            view.selected = view.options[self.index - 1]
+            await interaction.response.defer()
+            view.stop()
 
 class ClubPickView(discord.ui.View):
     def __init__(self, author_id: int, options: List[Tuple[str, Dict[str, Any]]], timeout: int = 180):
@@ -48,30 +62,24 @@ class ClubPickView(discord.ui.View):
         self.selected: Optional[Tuple[str, Dict[str, Any]]] = None
         for i, (ctag, cfg) in enumerate(self.options, start=1):
             self.add_item(ClubPickButton(i, cfg["name"]))
+        # row 2 controls
+        self.add_item(discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, disabled=False))
+
+        # Wire the cancel button
+        self.children[-1].callback = self._cancel  # type: ignore
+
+    async def _cancel(self, interaction: discord.Interaction):
+        self.selected = None
+        await interaction.response.defer()
+        self.stop()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        self.selected = None
-        self.stop()
-
-    # Catch clicks for the numbered club buttons
-    def dispatch(self, event: str, *args, **kwargs):
-        if event == "on_interaction" and isinstance(args[0], discord.Interaction):
-            it = args[0]
-            if it.type.name == "component" and it.data and str(it.data.get("custom_id","")).startswith("club_"):
-                try:
-                    idx = int(str(it.data["custom_id"]).split("_", 1)[1]) - 1
-                    if 0 <= idx < len(self.options):
-                        self.selected = self.options[idx]
-                        self.stop()
-                        return it.response.defer()
-                except Exception:
-                    return it.response.defer()
-        return super().dispatch(event, *args, **kwargs)
+    async def on_timeout(self) -> None:
+        for c in self.children:
+            if hasattr(c, "disabled"):
+                c.disabled = True
 
 # ---------- Cog ----------
 
