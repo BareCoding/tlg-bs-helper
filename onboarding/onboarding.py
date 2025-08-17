@@ -2,17 +2,81 @@
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 import discord
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import eligible_clubs, tag_pretty
 
 ACCENT  = discord.Color.from_rgb(66,135,245)
 SUCCESS = discord.Color.green()
+WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 
+# ---------- UI components ----------
+
+class TagSelect(discord.ui.Select):
+    def __init__(self, saved_tags: List[str]):
+        options = [discord.SelectOption(label=f"Use {tag_pretty(t)}", value=t) for t in saved_tags]
+        options.append(discord.SelectOption(label="Enter a new tag…", value="_new", emoji="✍️"))
+        super().__init__(placeholder="Choose a saved tag, or enter a new one…", min_values=1, max_values=1, options=options)
+
+class TagSelectView(discord.ui.View):
+    def __init__(self, author_id: int, saved_tags: List[str], timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.choice: Optional[str] = None
+        self.add_item(TagSelect(saved_tags))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    @discord.ui.select(cls=TagSelect)
+    async def choose(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.choice = select.values[0]
+        await interaction.response.defer()
+        self.stop()
+
+class ClubPickButton(discord.ui.Button):
+    def __init__(self, index: int, label: str):
+        super().__init__(style=discord.ButtonStyle.primary, label=f"{index}. {label}", custom_id=f"club_{index}")
+
+class ClubPickView(discord.ui.View):
+    def __init__(self, author_id: int, options: List[Tuple[str, Dict[str, Any]]], timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.options = options[:5]
+        self.selected: Optional[Tuple[str, Dict[str, Any]]] = None
+        for i, (ctag, cfg) in enumerate(self.options, start=1):
+            self.add_item(ClubPickButton(i, cfg["name"]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.selected = None
+        self.stop()
+
+    # Catch clicks for the numbered club buttons
+    def dispatch(self, event: str, *args, **kwargs):
+        if event == "on_interaction" and isinstance(args[0], discord.Interaction):
+            it = args[0]
+            if it.type.name == "component" and it.data and str(it.data.get("custom_id","")).startswith("club_"):
+                try:
+                    idx = int(str(it.data["custom_id"]).split("_", 1)[1]) - 1
+                    if 0 <= idx < len(self.options):
+                        self.selected = self.options[idx]
+                        self.stop()
+                        return it.response.defer()
+                except Exception:
+                    return it.response.defer()
+        return super().dispatch(event, *args, **kwargs)
+
+# ---------- Cog ----------
+
 class Onboarding(commands.Cog):
-    """DM onboarding: confirm/save a tag, suggest eligible clubs, notify leaders."""
+    """DM onboarding: confirm/save a tag, show rich eligible-club info, ping leadership on apply."""
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -61,10 +125,10 @@ class Onboarding(commands.Cog):
 
     @commands.command()
     async def bsstart(self, ctx):
-        """Start the club application wizard in DMs."""
+        """Start the club application wizard in DMs (select menus & buttons)."""
         if not isinstance(ctx.channel, discord.DMChannel):
             try:
-                await ctx.author.send(embed=discord.Embed(title="Club Application", description="What's your player tag? (e.g. `#ABCD123`)", color=ACCENT))
+                await ctx.author.send(embed=discord.Embed(title="Club Application", description="Let's get you set up in here. 👍", color=ACCENT))
                 await ctx.send(embed=discord.Embed(title="Check your DMs", color=ACCENT))
             except discord.Forbidden:
                 await ctx.send(embed=discord.Embed(title="Open your DMs", description="Please enable DMs and run `bsstart` again.", color=ERROR))
@@ -75,42 +139,40 @@ class Onboarding(commands.Cog):
             return await ctx.send(embed=discord.Embed(title="No mutual server", color=ERROR))
         guild = mutual[0]
         api = await self._api(guild)
+
+        # Step 1: choose/enter tag
         pcog = self.bot.get_cog("Players")
         chosen_norm: Optional[str] = None
 
         if pcog:
             u = await pcog.config.user(ctx.author).all()
-            if u["tags"]:
-                lines = [f"**{i+1}.** {tag_pretty(t)}" for i, t in enumerate(u["tags"], start=1)]
-                ask = discord.Embed(
+            saved = [t for t in u["tags"] if t]
+            if saved:
+                emb = discord.Embed(
                     title="Use an existing tag?",
-                    description="I found these saved tags:\n"
-                                + "\n".join(lines)
-                                + "\n\nReply with the **number** to use, or type `new` to enter a different tag.",
-                    color=ACCENT,
+                    description="Pick one of your saved tags below, or choose **Enter a new tag…**",
+                    color=ACCENT
                 )
-                await ctx.send(embed=ask)
-
-                def check_me(m): return m.author.id == ctx.author.id and isinstance(m.channel, discord.DMChannel)
-                try:
-                    choice = await self.bot.wait_for("message", check=check_me, timeout=180)
-                    content = choice.content.strip().lower()
-                    if content.isdigit():
-                        idx = int(content) - 1
-                        if 0 <= idx < len(u["tags"]):
-                            chosen_norm = u["tags"][idx]
-                except Exception:
+                view = TagSelectView(ctx.author.id, saved)
+                msg = await ctx.send(embed=emb, view=view)
+                await view.wait()
+                await msg.edit(view=None)
+                if view.choice is None:
                     return await ctx.send(embed=discord.Embed(title="Timed out", color=ERROR))
+                if view.choice != "_new":
+                    chosen_norm = view.choice
 
         if not chosen_norm:
-            await ctx.send(embed=discord.Embed(title="Your Tag", description="Please send your player tag (e.g. `#ABCD123`).", color=ACCENT))
+            ask = discord.Embed(title="Your Tag", description="Please send your player tag (e.g. `#ABCD123`).", color=ACCENT)
+            await ctx.send(embed=ask)
             def check_tag(m): return m.author.id == ctx.author.id and isinstance(m.channel, discord.DMChannel)
             try:
-                msg = await self.bot.wait_for("message", check=check_tag, timeout=180)
+                raw = await self.bot.wait_for("message", check=check_tag, timeout=180)
             except Exception:
                 return await ctx.send(embed=discord.Embed(title="Timed out", color=ERROR))
-            chosen_norm = api.norm_tag(msg.content)
+            chosen_norm = api.norm_tag(raw.content)
 
+        # Validate & save minimal cache
         try:
             pdata = await api.get_player(chosen_norm)
         except Exception:
@@ -126,6 +188,7 @@ class Onboarding(commands.Cog):
             club = pdata.get("club") or {}
             await pcog.config.user(ctx.author).club_tag_cache.set((club.get("tag") or "").replace("#",""))
 
+        # Step 2: eligible clubs
         clubs_cog = self.bot.get_cog("Clubs")
         clubs_cfg = await clubs_cog.config.guild(guild).clubs() if clubs_cog else {}
         gconf = await self.config.guild(guild).all()
@@ -134,33 +197,74 @@ class Onboarding(commands.Cog):
         if not options:
             return await ctx.send(embed=discord.Embed(title="No eligible clubs right now", color=ERROR))
 
-        desc = "\n".join([f"**{i+1}** — {c[1]['name']} (req {c[1].get('required_trophies',0)} trophies)" for i, c in enumerate(options[:5])])
-        await ctx.send(embed=discord.Embed(title=f"Hi {ign}!", description="Pick a club by number:\n" + desc, color=ACCENT))
+        # Pull richer info for the top 5 (type, total trophies, description)
+        rich: Dict[str, Dict[str, Any]] = {}
+        for ctag, _ in options[:5]:
+            try:
+                cinfo = await api.get_club_by_tag(ctag)
+            except Exception:
+                cinfo = {}
+            rich[ctag] = {
+                "type": (cinfo.get("type") or "unknown").title(),
+                "trophies": cinfo.get("trophies", 0),
+                "desc": (cinfo.get("description") or "")[:140]  # short preview
+            }
 
-        def check_pick(m): return m.author.id == ctx.author.id and isinstance(m.channel, discord.DMChannel)
-        try:
-            pick = await self.bot.wait_for("message", check=check_pick, timeout=180)
-            idx = int(pick.content) - 1
-            ctag, ccfg = options[idx]
-        except Exception:
-            return await ctx.send(embed=discord.Embed(title="Invalid choice", color=ERROR))
+        # Build pretty list
+        lines = []
+        for i, (ctag, ccfg) in enumerate(options[:5], start=1):
+            members = roster_counts.get(ctag, 0)
+            r = rich.get(ctag, {})
+            lines.append(
+                f"**{i}. {ccfg['name']}**  #{ctag}\n"
+                f"• Type: {r.get('type','Unknown')} | Members: {members}/50 | Club Trophies: {r.get('trophies',0):,}\n"
+                f"• Required Trophies: {ccfg.get('required_trophies',0):,}\n"
+                f"• {r.get('desc','')}"
+            )
+
+        emb = discord.Embed(
+            title=f"Hi {ign}!",
+            description="Pick a club by clicking a button below:\n\n" + "\n\n".join(lines),
+            color=ACCENT
+        )
+        view = ClubPickView(ctx.author.id, options)
+        msg2 = await ctx.send(embed=emb, view=view)
+        await view.wait()
+        await msg2.edit(view=None)
+        if view.selected is None:
+            return await ctx.send(embed=discord.Embed(title="Cancelled", color=WARN))
+        ctag, ccfg = view.selected
 
         await self.config.member_from_ids(guild.id, ctx.author.id).pending_club_tag.set(ctag)
 
+        # Step 3: notify leadership (ping leadership role if set)
         notify_id = gconf.get("apply_notify_channel_id")
         target = guild.get_channel(notify_id or 0)
-        if not target and clubs_cog:
-            clubs_cfg = await clubs_cog.config.guild(guild).clubs()
-            cfg = clubs_cfg.get(ctag)
-            if cfg:
-                target = guild.get_channel(cfg.get("log_channel_id") or 0)
+        leadership_ping = None
+        if clubs_cog:
+            tracked = await clubs_cog.config.guild(guild).clubs()
+            cfg = tracked.get(ctag) or {}
+            if not target and cfg.get("log_channel_id"):
+                target = guild.get_channel(cfg.get("log_channel_id"))
+            if cfg.get("leadership_role_id"):
+                role = guild.get_role(cfg["leadership_role_id"])
+                if role:
+                    leadership_ping = role.mention
 
         if target:
-            e = discord.Embed(title="New Application", color=SUCCESS,
-                              description=f"**{ign}** ({pdata.get('tag','')}) wants to join **{ccfg['name']}** #{ctag}. Please accept in-game.")
-            await target.send(embed=e)
+            content = leadership_ping or None
+            e = discord.Embed(
+                title="New Application",
+                description=f"**{ign}** ({pdata.get('tag','')}) wants to join **{ccfg['name']}** #{ctag}. Please accept in-game.",
+                color=SUCCESS
+            )
+            await target.send(content=content, embed=e)
 
-        done = discord.Embed(title="Next Step", description="Great! Request to join that club in-game. I’ll update your roles once you’re in.", color=SUCCESS)
+        done = discord.Embed(
+            title="Next Step",
+            description=f"Great! Request to join **{ccfg['name']}** in-game now. I’ll update your roles once you’re in.",
+            color=SUCCESS
+        )
         await ctx.send(embed=done)
 
 async def setup(bot: Red):

@@ -17,7 +17,8 @@ class Clubs(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xC10B5, force_registration=True)
         default_guild = {
-            "clubs": {}  # club_tag -> {name, required_trophies, role_id, badge_id, log_channel_id}
+            # club_tag -> {name, required_trophies, role_id, badge_id, log_channel_id, leadership_role_id}
+            "clubs": {}
         }
         self.config.register_guild(**default_guild)
         self._apis = {}
@@ -47,10 +48,11 @@ class Clubs(commands.Cog):
             "required_trophies": c.get("requiredTrophies", 0),
             "role_id": None,
             "badge_id": (c.get("badgeId") or 0),
-            "log_channel_id": None
+            "log_channel_id": None,
+            "leadership_role_id": None,
         }
         async with self.config.guild(ctx.guild).clubs() as clubs:
-            clubs[ctag] = cfg
+            clubs[ctag] = {**clubs.get(ctag, {}), **cfg}
         e = discord.Embed(title="Club Tracked", description=f"**{cfg['name']}** #{ctag}", color=SUCCESS)
         if cfg["badge_id"]:
             e.set_thumbnail(url=club_badge_url(cfg["badge_id"]))
@@ -89,13 +91,24 @@ class Clubs(commands.Cog):
 
     @clubs.command()
     async def setrole(self, ctx, club_tag: str, role: discord.Role):
-        """Set the Discord role for members of this club."""
+        """Set the Discord member role for this club (granted on join)."""
         ctag = club_tag.replace("#","").upper()
         async with self.config.guild(ctx.guild).clubs() as clubs:
             if ctag not in clubs:
                 return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
             clubs[ctag]["role_id"] = role.id
         e = discord.Embed(title="Role Set", description=f"Members of #{ctag} get {role.mention}.", color=SUCCESS)
+        await ctx.send(embed=e)
+
+    @clubs.command()
+    async def setlead(self, ctx, club_tag: str, role: discord.Role):
+        """Set a **leadership role** to ping on new club applications."""
+        ctag = club_tag.replace("#","").upper()
+        async with self.config.guild(ctx.guild).clubs() as clubs:
+            if ctag not in clubs:
+                return await ctx.send(embed=discord.Embed(title="Not Tracked", description="Add the club first.", color=ERROR))
+            clubs[ctag]["leadership_role_id"] = role.id
+        e = discord.Embed(title="Leadership Role Set", description=f"Applications for #{ctag} will ping {role.mention}.", color=SUCCESS)
         await ctx.send(embed=e)
 
     @clubs.command()
@@ -118,7 +131,12 @@ class Clubs(commands.Cog):
             return await ctx.send(embed=e)
         lines = []
         for k, v in clubs.items():
-            lines.append(f"**{v['name']}**  #{k} | req {v['required_trophies']} | role: {'set' if v.get('role_id') else 'unset'} | log: {'set' if v.get('log_channel_id') else 'unset'}")
+            lines.append(
+                f"**{v['name']}**  #{k} | req {v['required_trophies']}"
+                f" | role: {'set' if v.get('role_id') else 'unset'}"
+                f" | lead: {'set' if v.get('leadership_role_id') else 'unset'}"
+                f" | log: {'set' if v.get('log_channel_id') else 'unset'}"
+            )
         e = discord.Embed(title="Tracked Clubs", description="\n".join(lines), color=ACCENT)
         await ctx.send(embed=e)
 

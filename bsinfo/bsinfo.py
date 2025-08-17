@@ -18,7 +18,6 @@ WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 GOLD    = discord.Color.gold()
 
-# ---------- Simple paginator ----------
 class EmbedPager(View):
     def __init__(self, pages: List[discord.Embed], author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
@@ -64,13 +63,11 @@ class BSInfo(commands.Cog):
             self._apis[guild.id] = cli
         return cli
 
-    # ------- Group: bs -------
     @commands.group()
     async def bs(self, ctx):
         """Brawl Stars API commands."""
         pass
 
-    # ----- Player -----
     @bs.command()
     async def player(self, ctx, tag: str):
         """Show a player's full profile (multi-page)."""
@@ -88,7 +85,6 @@ class BSInfo(commands.Cog):
         club_tag  = club.get("tag","—")
         brawlers  = p.get("brawlers") or []
 
-        # Page 1 — Overview
         e1 = discord.Embed(title=f"{name} ({tag_fmt})", color=ACCENT, description=f"**Club:** {club_name} {club_tag}")
         e1.add_field(name="Trophies", value=f"{trophies:,}")
         e1.add_field(name="Highest", value=f"{highest:,}")
@@ -97,13 +93,11 @@ class BSInfo(commands.Cog):
         e1.set_thumbnail(url=player_avatar_url(icon_id))
         e1.set_footer(text=ctx.guild.name)
 
-        # Page 2 — Brawlers summary
         lines = []
         for b in sorted(brawlers, key=lambda x: (-x.get("trophies",0), x.get("name",""))):
             lines.append(f"**{b.get('name')}** — {b.get('trophies',0):,} 🏆  | Pwr {b.get('power',0)} | R{b.get('rank',0)}")
         e2 = discord.Embed(title="Brawlers", color=ACCENT, description="\n".join(lines[:20]) or "—")
 
-        # Page 3 — Gadgets/Star Powers/Gears
         lines2 = []
         for b in brawlers:
             sps = ", ".join([sp.get("name","") for sp in (b.get("starPowers") or [])]) or "—"
@@ -115,10 +109,9 @@ class BSInfo(commands.Cog):
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=e1, view=view)
 
-    # ----- Club overview -----
     @bs.command()
     async def club(self, ctx, club_tag: str):
-        """Show club overview (badge, trophies, type, required trophies, description)."""
+        """Show club overview."""
         api = await self._api(ctx.guild)
         c = await api.get_club_by_tag(club_tag)
 
@@ -138,7 +131,6 @@ class BSInfo(commands.Cog):
             e.set_thumbnail(url=club_badge_url(badge))
         await ctx.send(embed=e)
 
-    # ----- Club roster (paginated) -----
     @bs.command()
     async def clubmembers(self, ctx, club_tag: str):
         """List all members of a club (paginated)."""
@@ -160,7 +152,6 @@ class BSInfo(commands.Cog):
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=pages[0], view=view)
 
-    # ----- Brawlers catalog -----
     @bs.command()
     async def brawlers(self, ctx):
         """List all brawlers (paginated)."""
@@ -182,7 +173,6 @@ class BSInfo(commands.Cog):
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=pages[0], view=view)
 
-    # ----- Single brawler details -----
     @bs.command()
     async def brawler(self, ctx, *, id_or_name: str):
         """Show details for a specific brawler (gadgets, star powers, rarity)."""
@@ -201,7 +191,6 @@ class BSInfo(commands.Cog):
         rarity = (b.get("rarity") or {}).get("name","?")
         sps = b.get("starPowers") or []
         gds = b.get("gadgets") or []
-        # (Gears aren’t in BS API — available via Brawlify datasets; icons path provided though)
 
         e = discord.Embed(title=name, description=f"Rarity: **{rarity}**", color=ACCENT)
         e.set_thumbnail(url=brawler_icon_url(b.get("id",0)))
@@ -211,15 +200,14 @@ class BSInfo(commands.Cog):
             e.add_field(name="Gadgets", value="\n".join([f"• {gd.get('name')}" for gd in gds]), inline=False)
         await ctx.send(embed=e)
 
-    # ----- Rankings -----
     @bs.group()
     async def rankings(self, ctx):
-        """Show global or country rankings."""
+        """Global or country rankings."""
         pass
 
     @rankings.command(name="players")
     async def rankings_players(self, ctx, country: str = "global", limit: int = 25):
-        """Top players (global or country code like 'AU', 'US', 'GB')."""
+        """Top players (global or country code like 'AU', 'US')."""
         api = await self._api(ctx.guild)
         data = await api.get_rankings_players(country.lower(), limit)
         items = data.get("items") or []
@@ -263,18 +251,17 @@ class BSInfo(commands.Cog):
         for i, it in enumerate(items, start=1):
             player = it.get("player") or {}
             lines.append(f"**{i}.** {player.get('name')} ({player.get('tag')}) • {it.get('trophies',0):,} 🏆")
-        title = f"Top {find_brawler_id_by_name(all_b, str(bid)) or id_or_name} — {country.upper()}"
+        title = f"Top {id_or_name} — {country.upper()}"
         e = discord.Embed(title=title, description="\n".join(lines) or "—", color=GOLD)
         e.set_thumbnail(url=brawler_icon_url(bid))
         await ctx.send(embed=e)
 
-    # ----- Events / rotation -----
     @bs.command()
     async def events(self, ctx):
         """Current event rotation (maps & modes)."""
         api = await self._api(ctx.guild)
         rot = await api.get_events_rotation()
-        active = rot.get("active") or rot.get("events") or rot.get("items") or rot  # tolerate shape differences
+        active = rot.get("active") or rot.get("events") or rot.get("items") or rot
 
         if isinstance(active, dict):
             active = active.get("events") or active.get("items") or []
