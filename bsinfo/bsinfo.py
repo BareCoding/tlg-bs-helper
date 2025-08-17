@@ -396,7 +396,7 @@ class BSInfo(commands.Cog):
         """
         Start the application in DMs.
         """
-        ob = self.bot.get_cog("Onboarding")
+        ob = self.bot.get_cog("onboarding")
         if not ob or not hasattr(ob, "start_application_dm"):
             return await ctx.send(embed=discord.Embed(title="Onboarding not loaded", description="Ask an admin to load the Onboarding cog.", color=ERROR))
 
