@@ -39,7 +39,7 @@ class ClubSync(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xC10B5Y, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xC10B5F, force_registration=True)
         default_guild = {
             "enabled": True,
             "interval": 120,            # seconds
@@ -227,3 +227,4 @@ class ClubSync(commands.Cog):
 
 async def setup(bot: Red):
     await bot.add_cog(ClubSync(bot))
+
