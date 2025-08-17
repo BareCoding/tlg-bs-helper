@@ -1,0 +1,1 @@
+from .clubsync import setup

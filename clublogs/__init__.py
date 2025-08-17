@@ -1,0 +1,1 @@
+from .clublogs import setup
