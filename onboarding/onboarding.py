@@ -13,7 +13,6 @@ WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 
 # ---------- UI components ----------
-
 class TagSelect(discord.ui.Select):
     def __init__(self, saved_tags: List[str]):
         options = [discord.SelectOption(label=f"Use {tag_pretty(t)}", value=t) for t in saved_tags]
@@ -62,11 +61,9 @@ class ClubPickView(discord.ui.View):
         self.selected: Optional[Tuple[str, Dict[str, Any]]] = None
         for i, (ctag, cfg) in enumerate(self.options, start=1):
             self.add_item(ClubPickButton(i, cfg["name"]))
-        # row 2 controls
-        self.add_item(discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, disabled=False))
-
-        # Wire the cancel button
-        self.children[-1].callback = self._cancel  # type: ignore
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, disabled=False)
+        cancel.callback = self._cancel  # type: ignore
+        self.add_item(cancel)
 
     async def _cancel(self, interaction: discord.Interaction):
         self.selected = None
@@ -82,9 +79,8 @@ class ClubPickView(discord.ui.View):
                 c.disabled = True
 
 # ---------- Cog ----------
-
 class Onboarding(commands.Cog):
-    """DM onboarding: confirm/save a tag, show rich eligible-club info, ping leadership on apply."""
+    """Application flow in guild: confirm/save tag, show eligible clubs, ping leadership."""
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -96,7 +92,7 @@ class Onboarding(commands.Cog):
         default_member = {"pending_club_tag": None}
         self.config.register_guild(**default_guild)
         self.config.register_member(**default_member)
-        self._apis = {}
+        self._apis: Dict[int, BrawlStarsAPI] = {}
 
     async def _api(self, guild: discord.Guild) -> BrawlStarsAPI:
         token = await get_brawl_api_token(self.bot)
@@ -106,81 +102,51 @@ class Onboarding(commands.Cog):
             self._apis[guild.id] = cli
         return cli
 
-    @commands.group()
-    async def onboarding(self, ctx):
-        """Onboarding admin config."""
-        pass
-
-    @onboarding.command()
-    @commands.has_guild_permissions(manage_guild=True)
-    async def setnotify(self, ctx, channel: discord.TextChannel):
-        """Set the channel where new applications are announced."""
-        await self.config.guild(ctx.guild).apply_notify_channel_id.set(channel.id)
-        e = discord.Embed(title="Notify channel set", description=f"Applications will be posted in {channel.mention}.", color=SUCCESS)
-        await ctx.send(embed=e)
-
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        try:
-            e = discord.Embed(
-                title="Welcome!",
-                description="To apply for a club, reply with your Brawl Stars tag (e.g. `#ABCD123`) or run `bsstart` here anytime.",
-                color=ACCENT
-            )
-            await member.send(embed=e)
-        except discord.Forbidden:
-            pass
-
-    @commands.command()
-    async def bsstart(self, ctx):
-        """Start the club application wizard in DMs (select menus & buttons)."""
-        if not isinstance(ctx.channel, discord.DMChannel):
-            try:
-                await ctx.author.send(embed=discord.Embed(title="Club Application", description="Let's get you set up in here. 👍", color=ACCENT))
-                await ctx.send(embed=discord.Embed(title="Check your DMs", color=ACCENT))
-            except discord.Forbidden:
-                await ctx.send(embed=discord.Embed(title="Open your DMs", description="Please enable DMs and run `bsstart` again.", color=ERROR))
-            return
-
-        mutual = [g for g in self.bot.guilds if g.get_member(ctx.author.id)]
-        if not mutual:
-            return await ctx.send(embed=discord.Embed(title="No mutual server", color=ERROR))
-        guild = mutual[0]
+    # Public entrypoint called by bsinfo: !bs start
+    async def start_application(self, ctx: commands.Context):
+        """Runs the full application flow in the current guild channel."""
+        guild = ctx.guild
+        if guild is None:
+            return await ctx.send(embed=discord.Embed(title="Run this in a server", color=ERROR))
         api = await self._api(guild)
 
-        # Step 1: choose/enter tag
-        pcog = self.bot.get_cog("Players")
-        chosen_norm: Optional[str] = None
-
-        if pcog:
-            u = await pcog.config.user(ctx.author).all()
+        # Use bsinfo as tag store
+        bscog = self.bot.get_cog("BSInfo")
+        # STEP 1: choose or enter tag
+        saved = []
+        if bscog:
+            u = await bscog.config.user(ctx.author).all()
             saved = [t for t in u["tags"] if t]
-            if saved:
-                emb = discord.Embed(
-                    title="Use an existing tag?",
-                    description="Pick one of your saved tags below, or choose **Enter a new tag…**",
-                    color=ACCENT
-                )
-                view = TagSelectView(ctx.author.id, saved)
-                msg = await ctx.send(embed=emb, view=view)
-                await view.wait()
-                await msg.edit(view=None)
-                if view.choice is None:
-                    return await ctx.send(embed=discord.Embed(title="Timed out", color=ERROR))
-                if view.choice != "_new":
-                    chosen_norm = view.choice
+
+        chosen_norm: Optional[str] = None
+        if saved:
+            emb = discord.Embed(
+                title="Use an existing tag?",
+                description="Pick one of your saved tags below, or choose **Enter a new tag…**",
+                color=ACCENT
+            )
+            view = TagSelectView(ctx.author.id, saved)
+            msg = await ctx.send(embed=emb, view=view)
+            await view.wait()
+            try: await msg.edit(view=None)
+            except: pass
+            if view.choice is None:
+                return await ctx.send(embed=discord.Embed(title="Timed out", color=ERROR))
+            if view.choice != "_new":
+                chosen_norm = view.choice
 
         if not chosen_norm:
-            ask = discord.Embed(title="Your Tag", description="Please send your player tag (e.g. `#ABCD123`).", color=ACCENT)
+            ask = discord.Embed(title="Your Tag", description="Reply with your player tag (e.g. `#ABCD123`).", color=ACCENT)
             await ctx.send(embed=ask)
-            def check_tag(m): return m.author.id == ctx.author.id and isinstance(m.channel, discord.DMChannel)
+
+            def check_tag(m): return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
             try:
                 raw = await self.bot.wait_for("message", check=check_tag, timeout=180)
             except Exception:
                 return await ctx.send(embed=discord.Embed(title="Timed out", color=ERROR))
             chosen_norm = api.norm_tag(raw.content)
 
-        # Validate & save minimal cache
+        # Validate & save to bsinfo
         try:
             pdata = await api.get_player(chosen_norm)
         except Exception:
@@ -188,15 +154,15 @@ class Onboarding(commands.Cog):
 
         trophies = pdata.get("trophies", 0)
         ign = pdata.get("name", "Player")
-        if pcog:
-            async with pcog.config.user(ctx.author).tags() as tags:
+        if bscog:
+            async with bscog.config.user(ctx.author).tags() as tags:
                 if chosen_norm not in tags and len(tags) < 3:
                     tags.append(chosen_norm)
-            await pcog.config.user(ctx.author).ign_cache.set(pdata.get("name") or "")
+            await bscog.config.user(ctx.author).ign_cache.set(pdata.get("name") or "")
             club = pdata.get("club") or {}
-            await pcog.config.user(ctx.author).club_tag_cache.set((club.get("tag") or "").replace("#",""))
+            await bscog.config.user(ctx.author).club_tag_cache.set((club.get("tag") or "").replace("#",""))
 
-        # Step 2: eligible clubs
+        # STEP 2: eligible clubs
         clubs_cog = self.bot.get_cog("Clubs")
         clubs_cfg = await clubs_cog.config.guild(guild).clubs() if clubs_cog else {}
         gconf = await self.config.guild(guild).all()
@@ -205,7 +171,7 @@ class Onboarding(commands.Cog):
         if not options:
             return await ctx.send(embed=discord.Embed(title="No eligible clubs right now", color=ERROR))
 
-        # Pull richer info for the top 5 (type, total trophies, description)
+        # richer info from API
         rich: Dict[str, Dict[str, Any]] = {}
         for ctag, _ in options[:5]:
             try:
@@ -215,10 +181,9 @@ class Onboarding(commands.Cog):
             rich[ctag] = {
                 "type": (cinfo.get("type") or "unknown").title(),
                 "trophies": cinfo.get("trophies", 0),
-                "desc": (cinfo.get("description") or "")[:140]  # short preview
+                "desc": (cinfo.get("description") or "")[:140]
             }
 
-        # Build pretty list
         lines = []
         for i, (ctag, ccfg) in enumerate(options[:5], start=1):
             members = roster_counts.get(ctag, 0)
@@ -238,14 +203,15 @@ class Onboarding(commands.Cog):
         view = ClubPickView(ctx.author.id, options)
         msg2 = await ctx.send(embed=emb, view=view)
         await view.wait()
-        await msg2.edit(view=None)
+        try: await msg2.edit(view=None)
+        except: pass
         if view.selected is None:
             return await ctx.send(embed=discord.Embed(title="Cancelled", color=WARN))
         ctag, ccfg = view.selected
 
         await self.config.member_from_ids(guild.id, ctx.author.id).pending_club_tag.set(ctag)
 
-        # Step 3: notify leadership (ping leadership role if set)
+        # STEP 3: notify leadership (ping leadership role if set)
         notify_id = gconf.get("apply_notify_channel_id")
         target = guild.get_channel(notify_id or 0)
         leadership_ping = None
@@ -268,9 +234,11 @@ class Onboarding(commands.Cog):
             )
             await target.send(content=content, embed=e)
 
+        # Final message to applicant
         done = discord.Embed(
             title="Next Step",
-            description=f"Great! Request to join **{ccfg['name']}** in-game now. I’ll update your roles once you’re in.",
+            description=f"Great! Request to join **{ccfg['name']}** in-game now. "
+                        f"Once you’re in, I’ll update your roles and nickname.",
             color=SUCCESS
         )
         await ctx.send(embed=done)

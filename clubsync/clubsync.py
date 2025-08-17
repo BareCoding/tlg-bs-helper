@@ -116,7 +116,7 @@ class ClubSync(commands.Cog):
         await self.config.guild(guild).roster_counts.set(roster_counts)
 
         # Role/nickname sync
-        pcog = self.bot.get_cog("Players")
+        pcog = self.bot.get_cog("BSInfo")
         if not pcog:
             return
         for member in guild.members:
@@ -131,7 +131,8 @@ class ClubSync(commands.Cog):
             ctag = api.norm_tag(club.get("tag","")) if club.get("tag") else None
             ign  = pdata.get("name") or member.display_name
             if ctag and ctag in clubs:
-                desired = f"{ign} | {clubs[ctag]['name']}"
+                club_display = (clubs[ctag]['name'] or "").replace("TLG", "").strip()
+                desired = f"{ign} | {club_display}"
                 if guild.me.guild_permissions.manage_nicknames and member.display_name != desired:
                     try: await member.edit(nick=desired, reason="Club sync")
                     except: pass
