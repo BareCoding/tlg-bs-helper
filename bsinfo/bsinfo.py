@@ -297,7 +297,7 @@ class BSInfo(commands.Cog):
         chunk = 12
         for i in range(0, len(items), chunk):
             part = items[i:i+chunk]
-            lines = [f"**{b.get('name')}** — {b.get("rarity",{}).get("name","?")}" for b in part]
+            lines = [f"**{b.get('name')}** — {b.get('rarity', {}).get('name', '?')}" for b in part]
             thumb_id = part[0].get("id",0) if part else 0
             e = discord.Embed(title=f"Brawlers ({i+1}-{min(i+chunk,len(items))}/{len(items)})", description="\n".join(lines) or "—", color=ACCENT)
             if thumb_id:
