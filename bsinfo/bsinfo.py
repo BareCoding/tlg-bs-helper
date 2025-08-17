@@ -1,15 +1,19 @@
-# bsinfo/bsinfo.py
 from redbot.core import commands
 from redbot.core.bot import Red
 import discord
 from typing import List, Dict, Any, Optional
 from discord.ui import View, button, Button
+
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
+# import only what we use here to avoid failures on stale helpers
 from brawlcommon.utils import (
-    tag_pretty, player_avatar_url, club_badge_url, brawler_icon_url,
-    starpower_icon_url, gadget_icon_url, gear_icon_url, mode_icon_url, map_image_url,
-    find_brawler_id_by_name
+    player_avatar_url,
+    club_badge_url,
+    brawler_icon_url,
+    mode_icon_url,
+    map_image_url,
+    find_brawler_id_by_name,
 )
 
 ACCENT  = discord.Color.from_rgb(66,135,245)
@@ -18,10 +22,11 @@ WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 GOLD    = discord.Color.gold()
 
+# ---------- Simple paginator ----------
 class EmbedPager(View):
     def __init__(self, pages: List[discord.Embed], author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
-        self.pages = pages
+        self.pages = pages or [discord.Embed(title="No pages", color=ERROR)]
         self.i = 0
         self.author_id = author_id
 
@@ -34,13 +39,15 @@ class EmbedPager(View):
 
     @button(label="◀", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author_id: return await interaction.response.defer()
+        if interaction.user.id != self.author_id:
+            return await interaction.response.defer()
         self.i = (self.i - 1) % len(self.pages)
         await self._update(interaction)
 
     @button(label="▶", style=discord.ButtonStyle.primary)
     async def nxt(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.author_id: return await interaction.response.defer()
+        if interaction.user.id != self.author_id:
+            return await interaction.response.defer()
         self.i = (self.i + 1) % len(self.pages)
         await self._update(interaction)
 
@@ -56,7 +63,7 @@ class BSInfo(commands.Cog):
             await api.close()
 
     async def _api(self, guild: discord.Guild) -> BrawlStarsAPI:
-        token = await get_brawl_api_token(self.bot)
+        token = await get_brawl_api_token(self.bot)  # raises nice error if not set
         cli = self._apis.get(guild.id)
         if not cli:
             cli = BrawlStarsAPI(token)
@@ -68,9 +75,10 @@ class BSInfo(commands.Cog):
         """Brawl Stars API commands."""
         pass
 
+    # ----- Player -----
     @bs.command()
     async def player(self, ctx, tag: str):
-        """Show a player's full profile (multi-page)."""
+        """Show a player's profile (multi-page)."""
         api = await self._api(ctx.guild)
         p = await api.get_player(tag)
 
@@ -98,17 +106,11 @@ class BSInfo(commands.Cog):
             lines.append(f"**{b.get('name')}** — {b.get('trophies',0):,} 🏆  | Pwr {b.get('power',0)} | R{b.get('rank',0)}")
         e2 = discord.Embed(title="Brawlers", color=ACCENT, description="\n".join(lines[:20]) or "—")
 
-        lines2 = []
-        for b in brawlers:
-            sps = ", ".join([sp.get("name","") for sp in (b.get("starPowers") or [])]) or "—"
-            gds = ", ".join([gd.get("name","") for gd in (b.get("gadgets") or [])]) or "—"
-            lines2.append(f"**{b.get('name')}**\nSP: {sps}\nGadget: {gds}\n")
-        e3 = discord.Embed(title="Powers & Gadgets", color=ACCENT, description="\n".join(lines2[:15]) or "—")
-
-        pages = [e1, e2, e3]
+        pages = [e1, e2]
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=e1, view=view)
 
+    # ----- Club overview -----
     @bs.command()
     async def club(self, ctx, club_tag: str):
         """Show club overview."""
@@ -119,18 +121,21 @@ class BSInfo(commands.Cog):
         tag    = c.get("tag","")
         desc   = c.get("description","")
         badge  = c.get("badgeId") or 0
-        ttype  = c.get("type","unknown").title()
+        ttype  = (c.get("type") or "unknown").title()
         req    = c.get("requiredTrophies",0)
         count  = len(c.get("members") or [])
+        trophies = c.get("trophies", 0)
 
         e = discord.Embed(title=f"{name} ({tag})", color=GOLD, description=desc or "—")
         e.add_field(name="Type", value=ttype)
         e.add_field(name="Req. Trophies", value=f"{req:,}")
         e.add_field(name="Members", value=f"{count}/50")
+        e.add_field(name="Club Trophies", value=f"{trophies:,}")
         if badge:
             e.set_thumbnail(url=club_badge_url(badge))
         await ctx.send(embed=e)
 
+    # ----- Club roster (paginated) -----
     @bs.command()
     async def clubmembers(self, ctx, club_tag: str):
         """List all members of a club (paginated)."""
@@ -152,6 +157,7 @@ class BSInfo(commands.Cog):
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=pages[0], view=view)
 
+    # ----- Brawlers catalog -----
     @bs.command()
     async def brawlers(self, ctx):
         """List all brawlers (paginated)."""
@@ -165,41 +171,16 @@ class BSInfo(commands.Cog):
         for i in range(0, len(items), chunk):
             part = items[i:i+chunk]
             lines = [f"**{b.get('name')}** — {b.get('rarity',{}).get('name','?')}" for b in part]
+            thumb_id = part[0].get("id",0) if part else 0
             e = discord.Embed(title=f"Brawlers ({i+1}-{min(i+chunk,len(items))}/{len(items)})", description="\n".join(lines) or "—", color=ACCENT)
-            if part:
-                e.set_thumbnail(url=brawler_icon_url(part[0].get("id",0)))
+            if thumb_id:
+                e.set_thumbnail(url=brawler_icon_url(thumb_id))
             pages.append(e)
 
         view = EmbedPager(pages, author_id=ctx.author.id)
         await ctx.send(embed=pages[0], view=view)
 
-    @bs.command()
-    async def brawler(self, ctx, *, id_or_name: str):
-        """Show details for a specific brawler (gadgets, star powers, rarity)."""
-        api = await self._api(ctx.guild)
-        all_b = await api.get_brawlers()
-        bid: Optional[int] = None
-        if id_or_name.isdigit():
-            bid = int(id_or_name)
-        else:
-            bid = find_brawler_id_by_name(all_b, id_or_name)
-        if bid is None:
-            return await ctx.send(embed=discord.Embed(title="Brawler not found", color=ERROR))
-
-        b = await api.get_brawler(bid)
-        name = b.get("name","?")
-        rarity = (b.get("rarity") or {}).get("name","?")
-        sps = b.get("starPowers") or []
-        gds = b.get("gadgets") or []
-
-        e = discord.Embed(title=name, description=f"Rarity: **{rarity}**", color=ACCENT)
-        e.set_thumbnail(url=brawler_icon_url(b.get("id",0)))
-        if sps:
-            e.add_field(name="Star Powers", value="\n".join([f"• {sp.get('name')}" for sp in sps]), inline=False)
-        if gds:
-            e.add_field(name="Gadgets", value="\n".join([f"• {gd.get('name')}" for gd in gds]), inline=False)
-        await ctx.send(embed=e)
-
+    # ----- Rankings -----
     @bs.group()
     async def rankings(self, ctx):
         """Global or country rankings."""
@@ -251,18 +232,17 @@ class BSInfo(commands.Cog):
         for i, it in enumerate(items, start=1):
             player = it.get("player") or {}
             lines.append(f"**{i}.** {player.get('name')} ({player.get('tag')}) • {it.get('trophies',0):,} 🏆")
-        title = f"Top {id_or_name} — {country.upper()}"
-        e = discord.Embed(title=title, description="\n".join(lines) or "—", color=GOLD)
+        e = discord.Embed(title=f"Top {id_or_name} — {country.upper()}", description="\n".join(lines) or "—", color=GOLD)
         e.set_thumbnail(url=brawler_icon_url(bid))
         await ctx.send(embed=e)
 
+    # ----- Events / rotation -----
     @bs.command()
     async def events(self, ctx):
         """Current event rotation (maps & modes)."""
         api = await self._api(ctx.guild)
         rot = await api.get_events_rotation()
         active = rot.get("active") or rot.get("events") or rot.get("items") or rot
-
         if isinstance(active, dict):
             active = active.get("events") or active.get("items") or []
 
