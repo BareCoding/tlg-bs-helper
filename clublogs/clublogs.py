@@ -4,15 +4,18 @@ from redbot.core.bot import Red
 import discord
 from typing import Dict, List, Optional
 
+ACCENT  = discord.Color.from_rgb(66,135,245)
+SUCCESS = discord.Color.green()
+WARN    = discord.Color.orange()
+
 class ClubLogs(commands.Cog):
     """
     Posts per-club join/leave embeds to channels when ClubSync dispatches updates.
-    Also keeps a rolling in-Config history per club for quick viewing.
+    Also keeps a rolling in-Config history per club.
     """
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # valid hex (avoid 'L')
         self.config = Config.get_conf(self, identifier=0xC10B09, force_registration=True)
         default_guild = {
             "club_logs": {},           # club_tag -> [ {ts, type, player_tag, player_name} ... ]
@@ -21,7 +24,7 @@ class ClubLogs(commands.Cog):
         }
         self.config.register_guild(**default_guild)
 
-    # ---------- helpers ----------
+    # helpers
     def _mk_embed(self, guild: discord.Guild, payload: Dict) -> discord.Embed:
         event = payload["event"]  # 'join' | 'leave'
         color = discord.Color.green() if event == "join" else discord.Color.red()
@@ -45,33 +48,29 @@ class ClubLogs(commands.Cog):
                 arr[:] = arr[-maxlen:]
             logs[club_tag] = arr
 
-    # ---------- admin ----------
     @commands.group()
     async def clublog(self, ctx):
         """Club log utilities."""
-        if ctx.invoked_subcommand is None:
-            e = discord.Embed(title="ClubLogs", color=discord.Color.blurple(),
-                              description=("`[p]clublog setdefault #channel` – default log channel\n"
-                                           "`[p]clublog recent <#TAG> [count]` – view recent events\n"
-                                           "`[p]clublog setmax <n>` – change stored events cap"))
-            await ctx.send(embed=e)
+        pass
 
     @clublog.command(name="setdefault")
     @commands.admin()
     async def clublog_setdefault(self, ctx, channel: discord.TextChannel):
+        """Set a default channel for logs if a club has no dedicated channel."""
         await self.config.guild(ctx.guild).default_log_channel_id.set(channel.id)
-        e = discord.Embed(title="Default Log Channel Set", description=f"Logs will default to {channel.mention} when a club has no channel.", color=discord.Color.green())
+        e = discord.Embed(title="Default Log Channel Set", description=f"Logs default to {channel.mention} when a club has no channel.", color=SUCCESS)
         await ctx.send(embed=e)
 
     @clublog.command(name="recent")
     async def clublog_recent(self, ctx, club_tag: str, count: int = 20):
+        """Show recent events for a club (from local history)."""
         ctag = club_tag.replace("#","").upper()
         logs = await self.config.guild(ctx.guild).club_logs()
         arr = list(logs.get(ctag, []))[-max(1, min(count, 50)):]
         if not arr:
-            e = discord.Embed(title="No Events", description="No entries recorded yet.", color=discord.Color.orange())
+            e = discord.Embed(title="No Events", description="No entries recorded yet.", color=WARN)
             return await ctx.send(embed=e)
-        e = discord.Embed(title=f"Recent events for #{ctag}", color=discord.Color.blurple())
+        e = discord.Embed(title=f"Recent events for #{ctag}", color=ACCENT)
         for item in arr:
             sym = "➕" if item["type"] == "join" else "➖"
             e.add_field(
@@ -84,18 +83,18 @@ class ClubLogs(commands.Cog):
     @clublog.command(name="setmax")
     @commands.admin()
     async def clublog_setmax(self, ctx, max_entries: int):
+        """Change how many events are stored per club (default 500)."""
         await self.config.guild(ctx.guild).log_max.set(max(50, min(max_entries, 5000)))
-        e = discord.Embed(title="Stored Events Cap Updated", description=f"Now storing up to **{max(50, min(max_entries, 5000))}** per club.", color=discord.Color.green())
+        e = discord.Embed(title="Stored Events Cap Updated", description=f"Now storing up to **{max(50, min(max_entries, 5000))}** per club.", color=SUCCESS)
         await ctx.send(embed=e)
 
-    # ---------- event listener ----------
+    # event listener
     @commands.Cog.listener()
     async def on_brawl_club_update(self, guild: discord.Guild, payload: Dict):
         """
         Fired by ClubSync on each join/leave.
         payload = { club_tag, club_name, badge_id, event ('join'|'leave'), player_tag, player_name }
         """
-        # persist lightweight history
         await self._append_log(
             guild.id,
             payload["club_tag"],
@@ -107,7 +106,6 @@ class ClubLogs(commands.Cog):
             }
         )
 
-        # pick channel: per-club log from Clubs, else default
         clubs_cog = self.bot.get_cog("Clubs")
         channel_id: Optional[int] = None
         if clubs_cog:
@@ -118,14 +116,12 @@ class ClubLogs(commands.Cog):
 
         if not channel_id:
             channel_id = await self.config.guild(guild).default_log_channel_id()
-
         if not channel_id:
-            return  # nowhere to post yet
+            return
 
         ch = guild.get_channel(channel_id)
         if not ch:
             return
-
         emb = self._mk_embed(guild, payload)
         try:
             await ch.send(embed=emb)

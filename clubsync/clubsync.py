@@ -1,6 +1,7 @@
 # clubsync/clubsync.py
-from redbot.core import commands, Config, tasks
+from redbot.core import commands, Config
 from redbot.core.bot import Red
+from discord.ext import tasks
 import discord
 from typing import Dict, List, Set, Optional
 from brawlcommon.brawl_api import BrawlStarsAPI
@@ -11,10 +12,9 @@ class ClubSync(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # 0xC10C10 is valid hex
         self.config = Config.get_conf(self, identifier=0xC10C10, force_registration=True)
         default_guild = {
-            "clubs": {},          # club_tag -> {name, role_id, badge_id, log_channel_id, required_trophies, min_slots}
+            "clubs": {},          # club_tag -> {name, role_id, badge_id, log_channel_id, required_trophies}
             "rosters": {},        # club_tag -> [#TAG, ...] last snapshot
             "interval_sec": 60,
             "roster_counts": {}   # for onboarding suggestions
@@ -52,14 +52,12 @@ class ClubSync(commands.Cog):
     @commands.group()
     async def clubsync(self, ctx):
         """Club sync controls."""
-        if ctx.invoked_subcommand is None:
-            e = discord.Embed(title="ClubSync", color=discord.Color.blurple(),
-                              description="`[p]clubsync interval <seconds>` – set polling interval (min 15s)")
-            await ctx.send(embed=e)
+        pass
 
     @clubsync.command(name="interval")
     @commands.admin()
     async def clubsync_interval(self, ctx, seconds: int):
+        """Set polling interval (min 15s)."""
         seconds = max(15, seconds)
         await self.config.guild(ctx.guild).interval_sec.set(seconds)
         e = discord.Embed(title="Interval Updated", description=f"Polling every **{seconds}s**.", color=discord.Color.green())
@@ -92,7 +90,7 @@ class ClubSync(commands.Cog):
             joined = sorted(tags_now - prev)
             left   = sorted(prev - tags_now)
 
-            # Dispatch events; clublogs cog will post embeds
+            # Dispatch events; clublogs will post embeds
             for t in joined:
                 self.bot.dispatch("brawl_club_update", guild, {
                     "club_tag": ctag,

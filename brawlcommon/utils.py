@@ -46,10 +46,9 @@ def eligible_clubs(
     member_counts: Dict[str, int],
 ) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Eligibility from API values:
-      - player_trophies >= club.required_trophies
-      - roster size < 50
-    Sort: low members first, then higher requirements.
+    API-driven eligibility:
+      - player_trophies >= club.required_trophies (from official API)
+      - member_count < 50
     """
     out = []
     for ctag, cfg in (clubs_cfg or {}).items():
@@ -61,7 +60,6 @@ def eligible_clubs(
     return out
 
 def find_brawler_id_by_name(all_brawlers: Dict[str, Any], query: str) -> Optional[int]:
-    """Quick fuzzy-ish match for a brawler name to its id."""
     q = (query or "").strip().lower()
     for item in (all_brawlers.get("items") or []):
         name = (item.get("name") or "").lower()
