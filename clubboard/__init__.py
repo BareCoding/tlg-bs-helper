@@ -1,0 +1,1 @@
+from .clubboard import setup

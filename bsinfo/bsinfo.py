@@ -31,6 +31,8 @@ WARN    = discord.Color.orange()
 ERROR   = discord.Color.red()
 GOLD    = discord.Color.gold()
 
+MAX_MEMBERS = 30  # treat 30 as full
+
 
 # ---- Helper: find a cog by name (case-insensitive)
 def _find_cog(bot: Red, name: str):
@@ -71,7 +73,7 @@ class EmbedPager(View):
         await self._update(interaction)
 
 
-# ---------- Simple pick menu for fallback flow ----------
+# ---------- Simple pick menu for fallback application flow ----------
 class _PickButton(discord.ui.Button):
     def __init__(self, idx: int, label: str):
         super().__init__(style=discord.ButtonStyle.primary, label=f"{idx}. {label}")
@@ -113,7 +115,7 @@ class BSInfo(commands.Cog):
     or a built-in fallback if Onboarding isn't loaded.
     """
 
-    __version__ = "0.8.0"
+    __version__ = "0.9.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -155,7 +157,8 @@ class BSInfo(commands.Cog):
         - asks for/uses default tag
         - validates via API
         - fetches LIVE club info for tracked clubs (via Clubs cog)
-        - lets user pick; then notifies the club's log channel and/or leadership role
+        - skips full (>=30) clubs
+        - if all full: DM user + ping "BS Club Leadership" in the notify channel (if set)
         """
         try:
             dm = await member.create_dm()
@@ -179,12 +182,16 @@ class BSInfo(commands.Cog):
                 return await dm.send(embed=discord.Embed(title="Timed out", color=ERROR))
             use_tag = api.norm_tag(msg.content)
 
-        # validate + cache
         try:
             pdata = await api.get_player(use_tag)
         except Exception:
-            return await dm.send(embed=discord.Embed(title="Invalid tag", description="That tag couldn't be validated. Try again with `!bs tags save <tag>` in the server.", color=ERROR))
-        # Save to bsinfo storage (max 3)
+            return await dm.send(embed=discord.Embed(
+                title="Invalid tag",
+                description="That tag couldn't be validated. Try again with `!bs tags save <tag>` in the server.",
+                color=ERROR
+            ))
+
+        # Save to bsinfo storage (max 3) and cache IGN/club
         async with self.config.user(member).tags() as tags:
             if use_tag not in tags and len(tags) < 3:
                 tags.append(use_tag)
@@ -197,7 +204,11 @@ class BSInfo(commands.Cog):
         clubs_cog = _find_cog(self.bot, "clubs")
         tracked = await clubs_cog.config.guild(guild).clubs() if clubs_cog else {}
         if not tracked:
-            return await dm.send(embed=discord.Embed(title="No clubs configured", description="Ask staff to add clubs with `[p]clubs add #TAG`.", color=ERROR))
+            return await dm.send(embed=discord.Embed(
+                title="No clubs configured",
+                description="Ask staff to add clubs with `[p]clubs add #TAG`.",
+                color=ERROR
+            ))
 
         live_opts = []
         for ctag, cfg in tracked.items():
@@ -206,8 +217,10 @@ class BSInfo(commands.Cog):
             except Exception:
                 continue
             members = len(cinfo.get("members") or [])
+            if members >= MAX_MEMBERS:
+                continue
             req = int(cinfo.get("requiredTrophies", cfg.get("required_trophies", 0)))
-            if trophies >= req and members < 50:
+            if trophies >= req:
                 live_opts.append((ctag, {
                     "name": cinfo.get("name") or cfg.get("name") or f"#{ctag}",
                     "required_trophies": req,
@@ -217,27 +230,57 @@ class BSInfo(commands.Cog):
                     "_members": members,
                     "_type": (cinfo.get("type") or "unknown").title(),
                     "_club_trophies": cinfo.get("trophies", 0),
-                    "_desc": (cinfo.get("description") or "")[:140],
+                    "_desc": (cinfo.get("description") or "")[:180],
+                    "badge_id": cinfo.get("badgeId") or 0,
                 }))
-        if not live_opts:
-            return await dm.send(embed=discord.Embed(title="No eligible clubs right now", color=ERROR))
 
+        if not live_opts:
+            # DM the applicant
+            await dm.send(embed=discord.Embed(
+                title="All clubs are full",
+                description="Right now every club is at capacity. Leadership has been pinged — they’ll make space and follow up.",
+                color=WARN
+            ))
+            # Notify/ping in the configured channel (if Onboarding cog & notify channel exist)
+            ob = _find_cog(self.bot, "onboarding")
+            notify_id = None
+            if ob:
+                gconf = await ob.config.guild(guild).all()
+                notify_id = gconf.get("apply_notify_channel_id")
+            if notify_id:
+                notify = guild.get_channel(notify_id)
+                if notify:
+                    role = discord.utils.get(guild.roles, name="BS Club Leadership")
+                    mention = role.mention if role else None
+                    e = discord.Embed(
+                        title="Applicant waiting — all clubs full",
+                        description=f"**{ign}** ({pdata.get('tag','')}) tried to apply but all clubs are full (≥{MAX_MEMBERS}).",
+                        color=ERROR
+                    )
+                    await notify.send(content=mention, embed=e)
+            return
+
+        # Sort: lowest members first, then higher req
         live_opts.sort(key=lambda x: (x[1]["_members"], -x[1].get("required_trophies", 0)))
 
-        # 3) show options & let user pick
-        lines = []
-        for i, (ctag, ccfg) in enumerate(live_opts[:5], start=1):
-            lines.append(
-                f"**{i}. {ccfg['name']}**  #{ctag}\n"
-                f"• Type: {ccfg['_type']} | Members: {ccfg['_members']}/50 | Club Trophies: {ccfg['_club_trophies']:,}\n"
-                f"• Required Trophies: {ccfg.get('required_trophies', 0):,}\n"
-                f"• {ccfg['_desc']}"
+        # Pretty “cards” embed
+        cards = []
+        for ctag, c in live_opts[:5]:
+            cards.append(
+                f"**{c['name']}**  `#{ctag}`\n"
+                f"**Members:** {c['_members']}/{MAX_MEMBERS} • **Req:** {c.get('required_trophies',0):,} • "
+                f"**Club Trophies:** {c['_club_trophies']:,} • **Type:** {c['_type']}\n"
+                f"{c['_desc'] or '—'}"
             )
+
         pick_embed = discord.Embed(
-            title=f"Hi {ign}!",
-            description="Pick a club by clicking a button below:\n\n" + "\n\n".join(lines),
-            color=ACCENT
+            title=f"Hi {ign}! Pick an eligible club",
+            description="\n\n".join(cards),
+            color=GOLD
         )
+        if len(live_opts) == 1 and live_opts[0][1]["badge_id"]:
+            pick_embed.set_thumbnail(url=club_badge_url(live_opts[0][1]["badge_id"]))
+
         view = _PickView(member.id, live_opts)
         msg = await dm.send(embed=pick_embed, view=view)
         await view.wait()
@@ -249,19 +292,23 @@ class BSInfo(commands.Cog):
             return await dm.send(embed=discord.Embed(title="Cancelled", color=WARN))
         ctag, ccfg = view.selected
 
-        # 4) notify leadership / log channel
+        # 3) notify leadership / log channel
         content = None
-        if ccfg.get("leadership_role_id"):
-            role = guild.get_role(ccfg["leadership_role_id"])
+        rid = ccfg.get("leadership_role_id")
+        if rid:
+            role = guild.get_role(rid)
             if role:
                 content = role.mention
-        target = None
-        if ccfg.get("log_channel_id"):
-            target = guild.get_channel(ccfg["log_channel_id"])
+        if not content:
+            role = discord.utils.get(guild.roles, name="BS Club Leadership")
+            if role:
+                content = role.mention
+
+        target = guild.get_channel(ccfg.get("log_channel_id") or 0)
         if target:
             e = discord.Embed(
                 title="New Application",
-                description=f"**{ign}** ({pdata.get('tag','')}) wants to join **{ccfg['name']}** #{ctag}. Please accept in-game.",
+                description=f"**{ign}** ({pdata.get('tag','')}) wants to join **{ccfg['name']}** `#{ctag}`. Please accept in-game.",
                 color=SUCCESS
             )
             await target.send(content=content, embed=e)
@@ -298,12 +345,24 @@ class BSInfo(commands.Cog):
         norm = api.norm_tag(tag)
         async with self.config.user(ctx.author).tags() as tags:
             if norm in tags:
-                return await ctx.send(embed=discord.Embed(title="Tag already saved", description=f"{tag_pretty(norm)} is already in your list.", color=WARN))
+                return await ctx.send(embed=discord.Embed(
+                    title="Tag already saved",
+                    description=f"{tag_pretty(norm)} is already in your list.",
+                    color=WARN
+                ))
             if len(tags) >= 3:
-                return await ctx.send(embed=discord.Embed(title="Limit reached", description="You already have 3 tags saved.", color=ERROR))
+                return await ctx.send(embed=discord.Embed(
+                    title="Limit reached",
+                    description="You already have 3 tags saved.",
+                    color=ERROR
+                ))
             tags.append(norm)
         await self._cache_player_bits(ctx.author, pdata)
-        await ctx.send(embed=discord.Embed(title="Tag saved", description=f"Added **{tag_pretty(norm)}**.", color=SUCCESS))
+        await ctx.send(embed=discord.Embed(
+            title="Tag saved",
+            description=f"Added **{tag_pretty(norm)}**.",
+            color=SUCCESS
+        ))
 
     @bs_tags.command(name="list")
     async def bs_tags_list(self, ctx):
@@ -311,7 +370,11 @@ class BSInfo(commands.Cog):
         u = await self.config.user(ctx.author).all()
         tags = u["tags"]
         if not tags:
-            return await ctx.send(embed=discord.Embed(title="No tags yet", description="Use `[p]bs tags save <tag>` to add one.", color=WARN))
+            return await ctx.send(embed=discord.Embed(
+                title="No tags yet",
+                description="Use `[p]bs tags save <tag>` to add one.",
+                color=WARN
+            ))
         lines = []
         for i, t in enumerate(tags, start=1):
             star = " **(default)**" if (i - 1) == u["default_index"] else ""
@@ -325,9 +388,17 @@ class BSInfo(commands.Cog):
         i = index - 1
         tags = await self.config.user(ctx.author).tags()
         if not (0 <= i < len(tags)):
-            return await ctx.send(embed=discord.Embed(title="Invalid index", description="Choose an index from `[p]bs tags list`.", color=ERROR))
+            return await ctx.send(embed=discord.Embed(
+                title="Invalid index",
+                description="Choose an index from `[p]bs tags list`.",
+                color=ERROR
+            ))
         await self.config.user(ctx.author).default_index.set(i)
-        await ctx.send(embed=discord.Embed(title="Default updated", description=f"Default tag is now **{tag_pretty(tags[i])}**.", color=SUCCESS))
+        await ctx.send(embed=discord.Embed(
+            title="Default updated",
+            description=f"Default tag is now **{tag_pretty(tags[i])}**.",
+            color=SUCCESS
+        ))
 
     @bs_tags.command(name="move")
     async def bs_tags_move(self, ctx, index_from: int, index_to: int):
@@ -337,7 +408,11 @@ class BSInfo(commands.Cog):
         async with self.config.user(ctx.author).all() as u:
             tags: List[str] = u["tags"]
             if not (0 <= f < len(tags)) or not (0 <= t < len(tags)):
-                return await ctx.send(embed=discord.Embed(title="Invalid index", description="Use indices from `[p]bs tags list`.", color=ERROR))
+                return await ctx.send(embed=discord.Embed(
+                    title="Invalid index",
+                    description="Use indices from `[p]bs tags list`.",
+                    color=ERROR
+                ))
             item = tags.pop(f)
             tags.insert(t, item)
             # adjust default index
@@ -356,11 +431,19 @@ class BSInfo(commands.Cog):
         async with self.config.user(ctx.author).all() as u:
             tags: List[str] = u["tags"]
             if not (0 <= i < len(tags)):
-                return await ctx.send(embed=discord.Embed(title="Invalid index", description="Use indices from `[p]bs tags list`.", color=ERROR))
+                return await ctx.send(embed=discord.Embed(
+                    title="Invalid index",
+                    description="Use indices from `[p]bs tags list`.",
+                    color=ERROR
+                ))
             removed = tags.pop(i)
             if u["default_index"] >= len(tags):
                 u["default_index"] = 0
-        await ctx.send(embed=discord.Embed(title="Tag removed", description=f"Removed **{tag_pretty(removed)}**.", color=WARN))
+        await ctx.send(embed=discord.Embed(
+            title="Tag removed",
+            description=f"Removed **{tag_pretty(removed)}**.",
+            color=WARN
+        ))
 
     # ---------- Verify (guild-only) ----------
     @bs.command(name="verify")
@@ -378,7 +461,11 @@ class BSInfo(commands.Cog):
         api = await self._api(ctx.guild or self.bot.guilds[0])
         use_tag = tag or await self._get_default_tag(ctx.author)
         if not use_tag:
-            return await ctx.send(embed=discord.Embed(title="No default tag", description="Use `[p]bs tags save <tag>` first, or provide a tag.", color=ERROR))
+            return await ctx.send(embed=discord.Embed(
+                title="No default tag",
+                description="Use `[p]bs tags save <tag>` first, or provide a tag.",
+                color=ERROR
+            ))
         p = await api.get_player(use_tag)
 
         name = p.get("name", "Unknown")
@@ -427,7 +514,7 @@ class BSInfo(commands.Cog):
         e = discord.Embed(title=f"{name} ({tag})", color=GOLD, description=desc or "—")
         e.add_field(name="Type", value=ttype)
         e.add_field(name="Req. Trophies", value=f"{req:,}")
-        e.add_field(name="Members", value=f"{count}/50")
+        e.add_field(name="Members", value=f"{count}/{MAX_MEMBERS}")
         e.add_field(name="Club Trophies", value=f"{trophies:,}")
         if badge:
             e.set_thumbnail(url=club_badge_url(badge))
@@ -475,7 +562,11 @@ class BSInfo(commands.Cog):
             part = items[i:i+chunk]
             lines = [f"**{b.get('name')}** — {b.get('rarity', {}).get('name', '?')}" for b in part]
             thumb_id = part[0].get("id", 0) if part else 0
-            e = discord.Embed(title=f"Brawlers ({i+1}-{min(i+chunk, len(items))}/{len(items)})", description="\n".join(lines) or "—", color=ACCENT)
+            e = discord.Embed(
+                title=f"Brawlers ({i+1}-{min(i+chunk, len(items))}/{len(items)})",
+                description="\n".join(lines) or "—",
+                color=ACCENT
+            )
             if thumb_id:
                 e.set_thumbnail(url=brawler_icon_url(thumb_id))
             pages.append(e)
@@ -522,9 +613,8 @@ class BSInfo(commands.Cog):
         """Top players for a specific brawler."""
         api = await self._api(ctx.guild or self.bot.guilds[0])
         all_b = await api.get_brawlers()
-        bid: Optional[int] = None
         if id_or_name.isdigit():
-            bid = int(id_or_name)
+            bid: Optional[int] = int(id_or_name)
         else:
             bid = find_brawler_id_by_name(all_b, id_or_name)
         if bid is None:
