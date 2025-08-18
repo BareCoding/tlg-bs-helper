@@ -33,7 +33,7 @@ class CompositeMetaClass(type(commands.Cog), type(ABC)):
 
 
 @cog_i18n(_)
-class ModP(
+class Mod(
     ModSettings,
     Events,
     KickBanMixin,
