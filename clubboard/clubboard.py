@@ -13,11 +13,11 @@ from discord.ext import tasks
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone
 
-from brawlcommon.admin import bs_admin_check
+# from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import club_badge_url
-from brawlcommon.checks import role_check
+from brawlcommon.checks import bs_permission_check
 
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
@@ -78,13 +78,13 @@ class ClubBoard(commands.Cog):
 
     @commands.group()
     @commands.guild_only()
-    @commands.check(role_check)
+    @bs_permission_check()
     async def clubboard(self, ctx):
         """Configure and manage the live club board."""
         pass
 
     @clubboard.command(name="setchannel")
-    
+    @bs_permission_check()
     async def setchannel(self, ctx, channel: discord.TextChannel):
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await self.config.guild(ctx.guild).message_id.set(None)
@@ -93,7 +93,8 @@ class ClubBoard(commands.Cog):
         ))
 
     @clubboard.command(name="style")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def style(self, ctx, style: str):
         style = style.lower()
         if style not in STYLE_CHOICES:
@@ -107,7 +108,8 @@ class ClubBoard(commands.Cog):
         await self._render(ctx.guild, force_new=False)
 
     @clubboard.command(name="title")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def title(self, ctx, *, title: Optional[str] = None):
         await self.config.guild(ctx.guild).title.set(title)
         await ctx.send(embed=discord.Embed(
@@ -116,13 +118,15 @@ class ClubBoard(commands.Cog):
         await self._render(ctx.guild, force_new=False)
 
     @clubboard.command(name="refresh")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def refresh(self, ctx):
         await self._render(ctx.guild, force_new=False)
         await ctx.tick()
 
     @clubboard.command(name="start")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def start(self, ctx):
         if not self.loop.is_running():
             self.loop.start()
@@ -130,7 +134,8 @@ class ClubBoard(commands.Cog):
         await ctx.tick()
 
     @clubboard.command(name="stop")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def stop(self, ctx):
         if self.loop.is_running():
             self.loop.cancel()
