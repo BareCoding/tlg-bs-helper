@@ -12,9 +12,10 @@ from redbot.core import commands, Config
 from redbot.core.bot import Red
 from discord.ext import tasks
 
-from brawlcommon.admin import bs_admin_check
+# from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
+from brawlcommon.checks import bs_permission_check
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()
@@ -60,24 +61,28 @@ class ClubLogs(commands.Cog):
 
     @commands.group()
     @commands.guild_only()
+    @bs_permission_check()
     async def clublogs(self, ctx):
         """Configure the continuous club logs stream."""
         pass
 
     @clublogs.command(name="enable")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cl_enable(self, ctx):
         await self.config.guild(ctx.guild).enabled.set(True)
         await ctx.send(embed=discord.Embed(title="ClubLogs enabled", color=SUCCESS))
 
     @clublogs.command(name="disable")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cl_disable(self, ctx):
         await self.config.guild(ctx.guild).enabled.set(False)
         await ctx.send(embed=discord.Embed(title="ClubLogs disabled", color=WARN))
 
     @clublogs.command(name="interval")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cl_interval(self, ctx, seconds: int):
         seconds = max(60, min(600, seconds))
         await self.config.guild(ctx.guild).interval.set(seconds)

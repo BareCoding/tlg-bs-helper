@@ -11,10 +11,11 @@ import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 
-from brawlcommon.admin import bs_admin_check
+# from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import club_badge_url
+from brawlcommon.checks import bs_permission_check
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()
@@ -61,6 +62,7 @@ class Clubs(commands.Cog):
 
     @commands.group()
     @commands.guild_only()
+    @bs_permission_check()
     async def clubs(self, ctx):
         """Manage and view tracked clubs."""
         pass
@@ -68,7 +70,8 @@ class Clubs(commands.Cog):
     # ------- Admin: add/remove/config -------
 
     @clubs.command(name="add")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def clubs_add(self, ctx, club_tag: str):
         """Add a club by tag (pulls data from the API)."""
         api = await self._api(ctx.guild)
@@ -99,7 +102,8 @@ class Clubs(commands.Cog):
         await ctx.send(embed=e)
 
     @clubs.command(name="remove")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def clubs_remove(self, ctx, club_tag: str):
         """Remove a club from tracking."""
         api = await self._api(ctx.guild)
@@ -115,7 +119,8 @@ class Clubs(commands.Cog):
         ))
 
     @clubs.command(name="setrole")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def clubs_setrole(self, ctx, club_tag: str, role: discord.Role):
         """Set the Discord role to assign when a member joins this club."""
         api = await self._api(ctx.guild)
@@ -130,7 +135,7 @@ class Clubs(commands.Cog):
         ))
 
     @clubs.command(name="setlog")
-    @bs_admin_check()
+    # @bs_admin_check()
     async def clubs_setlog(self, ctx, club_tag: str, channel: discord.TextChannel):
         """Set the log/applications channel for this club."""
         api = await self._api(ctx.guild)
@@ -145,7 +150,8 @@ class Clubs(commands.Cog):
         ))
 
     @clubs.command(name="setlead")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def clubs_setlead(self, ctx, club_tag: str, role: discord.Role):
         """Set the leadership role to ping for this club."""
         api = await self._api(ctx.guild)
@@ -162,6 +168,7 @@ class Clubs(commands.Cog):
     # ------- Viewers -------
 
     @clubs.command(name="list")
+    @bs_permission_check()
     async def clubs_list(self, ctx):
         """List all tracked clubs."""
         clubs = await self.config.guild(ctx.guild).clubs()
@@ -177,7 +184,8 @@ class Clubs(commands.Cog):
         await ctx.send(embed=discord.Embed(title="Tracked Clubs", description="\n".join(lines), color=ACCENT))
 
     @clubs.command(name="refreshcache")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @commands.is_owner()
     async def clubs_refreshcache(self, ctx):
         """Refresh cached name/badge/req for all tracked clubs from API."""
         api = await self._api(ctx.guild)

@@ -14,9 +14,10 @@ from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import humanize_list
 from discord.ext import tasks
 
-from brawlcommon.admin import bs_admin_check
+# from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
+from brawlcommon.checks import bs_permission_check
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()
@@ -73,24 +74,28 @@ class ClubSync(commands.Cog):
 
     @commands.group()
     @commands.guild_only()
+    @bs_permission_check()
     async def clubsync(self, ctx):
         """Configure and manage the club sync worker."""
         pass
 
     @clubsync.command(name="enable")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cs_enable(self, ctx):
         await self.config.guild(ctx.guild).enabled.set(True)
         await ctx.send(embed=discord.Embed(title="ClubSync enabled", color=SUCCESS))
 
     @clubsync.command(name="disable")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cs_disable(self, ctx):
         await self.config.guild(ctx.guild).enabled.set(False)
         await ctx.send(embed=discord.Embed(title="ClubSync disabled", color=WARN))
 
     @clubsync.command(name="interval")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cs_interval(self, ctx, seconds: int):
         seconds = max(60, min(900, seconds))
         await self.config.guild(ctx.guild).interval.set(seconds)
@@ -99,7 +104,8 @@ class ClubSync(commands.Cog):
             self.loop.change_interval(seconds=seconds)
 
     @clubsync.command(name="nickformat")
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def cs_nickformat(self, ctx, *, fmt: str):
         """
         Set nickname format. Replacements:

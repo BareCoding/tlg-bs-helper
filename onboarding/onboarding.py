@@ -11,10 +11,11 @@ from redbot.core.bot import Red
 import discord
 from typing import Optional, Dict, Any, List, Tuple
 
-from brawlcommon.admin import bs_admin_check
+# from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import tag_pretty, club_badge_url
+from brawlcommon.checks import bs_permission_check
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()
@@ -101,13 +102,15 @@ class Onboarding(commands.Cog):
         return cli
 
     @commands.group()
+    @bs_permission_check()
     async def onboarding(self, ctx):
         """Onboarding admin config."""
         pass
 
     @onboarding.command()
     @commands.guild_only()
-    @bs_admin_check()
+    # @bs_admin_check()
+    @bs_permission_check()
     async def setnotify(self, ctx, channel: discord.TextChannel):
         """Set the channel where application notifications are posted."""
         await self.config.guild(ctx.guild).apply_notify_channel_id.set(channel.id)

@@ -24,6 +24,7 @@ from brawlcommon.utils import (
     map_image_url,
     find_brawler_id_by_name,
 )
+from brawlcommon.checks import bs_permission_check
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.green()

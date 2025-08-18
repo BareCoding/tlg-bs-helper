@@ -17,6 +17,8 @@ from brawlcommon.admin import bs_admin_check
 from brawlcommon.brawl_api import BrawlStarsAPI
 from brawlcommon.token import get_brawl_api_token
 from brawlcommon.utils import club_badge_url
+from brawlcommon.checks import role_check
+
 
 ACCENT  = discord.Color.from_rgb(66, 135, 245)
 SUCCESS = discord.Color.from_rgb(46, 204, 113)
@@ -76,12 +78,13 @@ class ClubBoard(commands.Cog):
 
     @commands.group()
     @commands.guild_only()
+    @commands.check(role_check)
     async def clubboard(self, ctx):
         """Configure and manage the live club board."""
         pass
 
     @clubboard.command(name="setchannel")
-    @bs_admin_check()
+    
     async def setchannel(self, ctx, channel: discord.TextChannel):
         await self.config.guild(ctx.guild).channel_id.set(channel.id)
         await self.config.guild(ctx.guild).message_id.set(None)
