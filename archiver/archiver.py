@@ -5,15 +5,10 @@ from typing import Optional, List
 import discord
 from redbot.core import commands, checks, Config
 
-
-__author__ = "yourname"
-__version__ = "1.0.0"
-
-
 DEFAULT_GUILD = {
     "management_guild_id": 773827710165844008,        # int
     "management_category_id": 1344350295219638363,     # Optional[int]
-    "delete_after_archive": True,       # bool
+    "delete_after_archive": True,                      # bool
 }
 
 
@@ -107,21 +102,38 @@ class ChannelArchiver(commands.Cog):
 
         status_msg = await ctx.send("🚚 Starting archive… this may take a while for large channels.")
 
-        # Create destination text channel with same name
-        overwrites = None  # optional: could restrict perms; leaving default of category/server
-        dest_category = dest_guild.get_channel(cat_id) if cat_id else None
+        # ---- Create destination text channel with same name ----
+        # Validate category id if present and only pass valid kwargs (omit overwrites entirely).
+        dest_category = None
+        if cat_id:
+            maybe_chan = dest_guild.get_channel(int(cat_id))
+            if maybe_chan and isinstance(maybe_chan, discord.CategoryChannel):
+                dest_category = maybe_chan
+            else:
+                return await status_msg.edit(
+                    content="❌ The configured management category ID is not a category in the destination guild."
+                )
+
         try:
-            dest_channel = await dest_guild.create_text_channel(name=src_channel.name, category=dest_category, overwrites=overwrites, reason=f"Archive of #{src_channel.name} from {src_guild.name}")
+            kwargs = {
+                "name": src_channel.name,
+                "reason": f"Archive of #{src_channel.name} from {src_guild.name}",
+            }
+            if dest_category:
+                kwargs["category"] = dest_category
+            dest_channel = await dest_guild.create_text_channel(**kwargs)
         except discord.Forbidden:
             return await status_msg.edit(content="❌ Missing permission to create channel in management server.")
         except Exception as e:
             return await status_msg.edit(content=f"❌ Failed to create destination channel: {e}")
 
-        # Create a webhook to mirror author name & avatar
+        # ---- Create a webhook to mirror author name & avatar ----
         try:
             webhook = await dest_channel.create_webhook(name=f"ArchiveMirror-{src_channel.name}")
         except discord.Forbidden:
             return await status_msg.edit(content="❌ Missing Manage Webhooks in destination channel.")
+        except Exception as e:
+            return await status_msg.edit(content=f"❌ Failed to create webhook in destination channel: {e}")
 
         # Header message in destination
         await dest_channel.send(
@@ -136,20 +148,19 @@ class ChannelArchiver(commands.Cog):
             ).set_footer(text=f"Started by {ctx.author} ({ctx.author.id})")
         )
 
-        # Copy messages oldest -> newest
+        # ---- Copy messages oldest -> newest ----
         total = 0
-        files_in_flight = 0
         try:
             async for message in src_channel.history(limit=None, oldest_first=True):
-                # Skip messages from the bot that control the process to reduce noise
+                # Skip the status message to reduce noise
                 if message.id == status_msg.id:
                     continue
 
                 username = f"{message.author.display_name}"
-                avatar_url = message.author.display_avatar.url if message.author.display_avatar else None
+                avatar_url = getattr(message.author.display_avatar, "url", None)
 
-                # Build content with timestamp
-                ts = discord.utils.format_dt(message.created_at, style='F')
+                # Build content with timestamp (Discord's formatted timestamp)
+                ts = discord.utils.format_dt(message.created_at, style="F")
                 header = f"[`{ts}`]"
                 content = (message.content or "").strip()
                 final_text = f"{header} {content}" if content else header
@@ -166,35 +177,32 @@ class ChannelArchiver(commands.Cog):
                         # Fallback: include URL if download fails
                         final_text += f"\n[Attachment could not be mirrored, original URL]({att.url})"
 
-                # Include embeds as raw dict fallbacks
+                # Include embeds as best-effort copies
                 embeds: List[discord.Embed] = []
                 for em in message.embeds:
                     try:
-                        # Best-effort conversion: rebuild basic embed
                         e = discord.Embed.from_dict(em.to_dict())
                         embeds.append(e)
                     except Exception:
                         pass
 
-                # Chunk if content too long for webhook
-                async def send_chunk(chunk_text: str):
+                async def send_chunk(chunk_text: str, with_payload: bool):
                     await webhook.send(
                         content=chunk_text or None,
                         username=username,
                         avatar_url=avatar_url,
-                        embeds=embeds if embeds else None,
-                        files=files if files else None,
+                        embeds=embeds if (with_payload and embeds) else None,
+                        files=files if (with_payload and files) else None,
                         allowed_mentions=discord.AllowedMentions.none(),
                         wait=True,
                     )
 
+                # Chunk if content too long for webhook
                 if final_text and len(final_text) > 2000:
-                    # Split on newlines or spaces
                     remaining = final_text
                     first = True
                     while remaining:
                         piece = remaining[:2000]
-                        # try not to split mid-word
                         if len(remaining) > 2000:
                             cut = piece.rfind("\n")
                             if cut < 1000:
@@ -205,13 +213,10 @@ class ChannelArchiver(commands.Cog):
                             remaining = remaining[cut:]
                         else:
                             remaining = ""
-                        await send_chunk(piece)
-                        if first and (files or embeds):
-                            # Only attach files/embeds to first chunk
-                            files, embeds = [], []
-                            first = False
+                        await send_chunk(piece, with_payload=first)
+                        first = False
                 else:
-                    await send_chunk(final_text)
+                    await send_chunk(final_text, with_payload=True)
 
                 total += 1
                 if total % 50 == 0:
@@ -235,7 +240,9 @@ class ChannelArchiver(commands.Cog):
                 pass
 
         await dest_channel.send(f"✅ Archive complete. Mirrored **{total}** messages.")
-        await status_msg.edit(content=f"✅ Archive complete. Mirrored **{total}** messages to {dest_guild.name} → {dest_channel.mention}.")
+        await status_msg.edit(
+            content=f"✅ Archive complete. Mirrored **{total}** messages to {dest_guild.name} → {dest_channel.mention}."
+        )
 
         # Delete original channel if configured
         if delete_after:
