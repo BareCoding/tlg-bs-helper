@@ -11,8 +11,8 @@ __version__ = "1.0.0"
 
 
 DEFAULT_GUILD = {
-    "management_guild_id": None,        # int
-    "management_category_id": None,     # Optional[int]
+    "management_guild_id": 773827710165844008,        # int
+    "management_category_id": 1344350295219638363,     # Optional[int]
     "delete_after_archive": True,       # bool
 }
 
