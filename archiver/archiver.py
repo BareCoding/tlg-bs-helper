@@ -5,9 +5,15 @@ from typing import Optional, List
 import discord
 from redbot.core import commands, checks, Config
 
+
+__author__ = "yourname"
+__version__ = "1.0.2"
+
+
 DEFAULT_GUILD = {
+    # Set your defaults here; these can be overridden per-guild via [p]archiveset ...
     "management_guild_id": 773827710165844008,        # int
-    "management_category_id": 1344350295219638363,     # Optional[int]
+    "management_category_id": 1344350295219638363,    # Optional[int]
     "delete_after_archive": True,                      # bool
 }
 
@@ -128,6 +134,7 @@ class ChannelArchiver(commands.Cog):
             return await status_msg.edit(content=f"❌ Failed to create destination channel: {e}")
 
         # ---- Create a webhook to mirror author name & avatar ----
+        webhook: Optional[discord.Webhook] = None
         try:
             webhook = await dest_channel.create_webhook(name=f"ArchiveMirror-{src_channel.name}")
         except discord.Forbidden:
@@ -157,7 +164,7 @@ class ChannelArchiver(commands.Cog):
                     continue
 
                 username = f"{message.author.display_name}"
-                avatar_url = getattr(message.author.display_avatar, "url", None)
+                avatar_url = getattr(message.author.display_avatar, "url", None) or None
 
                 # Build content with timestamp (Discord's formatted timestamp)
                 ts = discord.utils.format_dt(message.created_at, style="F")
@@ -186,19 +193,27 @@ class ChannelArchiver(commands.Cog):
                     except Exception:
                         pass
 
-                async def send_chunk(chunk_text: str, with_payload: bool):
+                async def send_chunk(chunk_text: Optional[str], first: bool = False):
+                    """
+                    Send via webhook. Some discord.py versions call len() on embeds/files/content,
+                    so never pass None; use empty string/list instead.
+                    Attach files/embeds only on the first chunk for that message.
+                    """
+                    safe_content = chunk_text if chunk_text is not None else ""
+                    payload_embeds = embeds if (first and embeds) else []
+                    payload_files = files if (first and files) else []
                     await webhook.send(
-                        content=chunk_text or None,
+                        content=safe_content,
                         username=username,
                         avatar_url=avatar_url,
-                        embeds=embeds if (with_payload and embeds) else None,
-                        files=files if (with_payload and files) else None,
+                        embeds=payload_embeds,
+                        files=payload_files,
                         allowed_mentions=discord.AllowedMentions.none(),
                         wait=True,
                     )
 
                 # Chunk if content too long for webhook
-                if final_text and len(final_text) > 2000:
+                if final_text and isinstance(final_text, str) and len(final_text) > 2000:
                     remaining = final_text
                     first = True
                     while remaining:
@@ -213,10 +228,10 @@ class ChannelArchiver(commands.Cog):
                             remaining = remaining[cut:]
                         else:
                             remaining = ""
-                        await send_chunk(piece, with_payload=first)
+                        await send_chunk(piece, first=first)
                         first = False
                 else:
-                    await send_chunk(final_text, with_payload=True)
+                    await send_chunk(final_text, first=True)
 
                 total += 1
                 if total % 50 == 0:
@@ -235,7 +250,8 @@ class ChannelArchiver(commands.Cog):
             return
         finally:
             try:
-                await webhook.delete(reason="Archive complete")
+                if webhook:
+                    await webhook.delete(reason="Archive complete")
             except Exception:
                 pass
 
