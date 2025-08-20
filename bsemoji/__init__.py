@@ -1,0 +1,1 @@
+from .bsemoji import setup
