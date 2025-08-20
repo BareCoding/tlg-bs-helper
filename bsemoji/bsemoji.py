@@ -60,7 +60,7 @@ class BSEmoji(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xB5E10J, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xB5E10, force_registration=True)
         # Per-guild registry: name -> emoji_id
         self.config.register_guild(registry={})
 
