@@ -167,8 +167,9 @@ class KickBanMixin(MixinMeta):
         else:
             tempbans = await self.config.guild(guild).current_tempbans()
 
-            ban_list = [ban.user.id for ban in await guild.bans()]
-            if user.id in ban_list:
+            # discord.py v2: bans() is an async iterator
+            existing_bans = {ban.user.id async for ban in guild.bans(limit=None)}
+            if user.id in existing_bans:
                 if user.id in tempbans:
                     async with self.config.guild(guild).current_tempbans() as tempbans:
                         tempbans.remove(user.id)
@@ -389,7 +390,7 @@ class KickBanMixin(MixinMeta):
         )
 
         await ctx.send(message)
-        await modplus.notify('ban', f'{user.name} has been banned.')
+        await modplus.notify('ban', f'{getattr(user, "name", user)} has been banned.')
 
     @commands.command(aliases=["hackban"], usage="<user_ids...> [days] [reason]")
     @commands.guild_only()
@@ -458,17 +459,20 @@ class KickBanMixin(MixinMeta):
 
         tempbans = await self.config.guild(guild).current_tempbans()
 
-        ban_list = await guild.bans()
-        for entry in ban_list:
-            for user_id in user_ids:
-                if entry.user.id == user_id:
-                    if user_id in tempbans:
-                        # We need to check if a user is tempbanned here because otherwise they won't be processed later on.
-                        continue
-                    else:
-                        errors[user_id] = _("User with ID {user_id} is already banned.").format(
-                            user_id=user_id
-                        )
+        # Build a set of currently banned user IDs (discord.py v2 async iterator)
+        existing_bans = {entry.user.id async for entry in guild.bans(limit=None)}
+
+        # Mark already-banned IDs (unless tempbanned, which will be upgraded later)
+        for user_id in list(user_ids):
+            if user_id in existing_bans:
+                if user_id in tempbans:
+                    # We need to check if a user is tempbanned here because otherwise
+                    # they won't be processed later on.
+                    continue
+                else:
+                    errors[user_id] = _("User with ID {user_id} is already banned.").format(
+                        user_id=user_id
+                    )
 
         user_ids = remove_processed(user_ids)
 
@@ -895,9 +899,14 @@ class KickBanMixin(MixinMeta):
         guild = ctx.guild
         author = ctx.author
         audit_reason = get_audit_reason(ctx.author, reason, shorten=True)
-        bans = await guild.bans()
-        bans = [be.user for be in bans]
-        user = discord.utils.get(bans, id=user_id)
+
+        # discord.py v2: iterate bans asynchronously to find the user
+        user = None
+        async for be in guild.bans(limit=None):
+            if be.user.id == user_id:
+                user = be.user
+                break
+
         if not user:
             await ctx.send(_("It seems that user isn't banned!"))
             return
